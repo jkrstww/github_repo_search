@@ -10,6 +10,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "search": {
         "raw_query": "",
         "keywords": [],
+        "any_keywords": [],
+        "in_fields": [],
         "language": "",
         "topics": [],
         "owner": "",
@@ -17,9 +19,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "sort": "stars",
         "order": "desc",
         "per_page": 100,
-        "max_results": 100,
+        "max_results": None,
         "include_forks": False,
         "include_archived": False,
+        "created_split": {
+            "enabled": False,
+            "start": "",
+            "end": "",
+            "interval": "month",
+        },
     },
     "filters": {
         "created_after": "",

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.client import IncompleteRead
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from .config import as_list
@@ -14,6 +17,8 @@ from .config import as_list
 
 SEARCH_REPOSITORIES_URL = "https://api.github.com/search/repositories"
 DEFAULT_API_VERSION = "2022-11-28"
+MAX_SEARCH_RESULTS = 1000
+REPOSITORY_SEARCH_FIELDS = {"name", "description", "topics", "readme"}
 
 
 class GitHubApiError(RuntimeError):
@@ -28,7 +33,42 @@ class SearchResult:
     query: str
 
 
-def build_search_query(search: dict[str, Any], filters: dict[str, Any] | None = None) -> str:
+@dataclass(frozen=True)
+class SearchPage:
+    repositories: list[dict[str, Any]]
+    total_count: int
+    incomplete_results: bool
+    query: str
+    page: int
+    per_page: int
+    fetched_count: int
+    target_count: int
+
+
+@dataclass(frozen=True)
+class CreatedRange:
+    start: date
+    end: date
+
+    def qualifier(self) -> str:
+        return f"created:{self.start.isoformat()}..{self.end.isoformat()}"
+
+
+@dataclass(frozen=True)
+class PlannedSearchQuery:
+    query: str
+    created_range: CreatedRange | None = None
+    keyword: str | None = None
+
+
+def build_search_query(
+    search: dict[str, Any],
+    filters: dict[str, Any] | None = None,
+    *,
+    created_range: CreatedRange | None = None,
+    include_filter_created: bool = True,
+    extra_keyword: str | None = None,
+) -> str:
     filters = filters or {}
     terms: list[str] = []
 
@@ -36,10 +76,19 @@ def build_search_query(search: dict[str, Any], filters: dict[str, Any] | None = 
     if raw_query:
         terms.append(raw_query)
 
-    for keyword in as_list(search.get("keywords")):
-        keyword_text = str(keyword).strip()
+    for required_keyword in as_list(search.get("keywords")):
+        keyword_text = str(required_keyword).strip()
         if keyword_text:
             terms.append(_quote_term(keyword_text))
+
+    if extra_keyword is not None:
+        keyword_text = str(extra_keyword).strip()
+        if keyword_text:
+            terms.append(_quote_term(keyword_text))
+
+    in_qualifier = _in_qualifier(search.get("in_fields"))
+    if in_qualifier:
+        terms.append(in_qualifier)
 
     language = str(search.get("language") or "").strip()
     if language:
@@ -68,13 +117,16 @@ def build_search_query(search: dict[str, Any], filters: dict[str, Any] | None = 
     if stars:
         terms.append(stars)
 
-    created = _range_qualifier(
-        "created",
-        _date_only(filters.get("created_after")),
-        _date_only(filters.get("created_before")),
-    )
-    if created:
-        terms.append(created)
+    if created_range is not None:
+        terms.append(created_range.qualifier())
+    elif include_filter_created:
+        created = _range_qualifier(
+            "created",
+            _date_only(filters.get("created_after")),
+            _date_only(filters.get("created_before")),
+        )
+        if created:
+            terms.append(created)
 
     pushed = _range_qualifier(
         "pushed",
@@ -87,6 +139,76 @@ def build_search_query(search: dict[str, Any], filters: dict[str, Any] | None = 
     return " ".join(terms)
 
 
+def build_search_queries(
+    search: dict[str, Any],
+    filters: dict[str, Any] | None = None,
+    *,
+    today: date | None = None,
+) -> list[PlannedSearchQuery]:
+    filters = filters or {}
+    keyword_variants = _keyword_variants(search)
+    split = search.get("created_split") or {}
+    if not bool(split.get("enabled", False)):
+        return [
+            PlannedSearchQuery(
+                build_search_query(search, filters, extra_keyword=keyword),
+                keyword=keyword,
+            )
+            for keyword in keyword_variants
+        ]
+
+    start = split.get("start") or filters.get("created_after")
+    if not start:
+        raise ValueError("search.created_split.start or filters.created_after is required when created_split is enabled")
+
+    end = split.get("end") or filters.get("created_before") or (today or date.today()).isoformat()
+    interval = str(split.get("interval") or "month").strip().lower()
+    ranges = build_created_ranges(start, end, interval=interval)
+    planned: list[PlannedSearchQuery] = []
+    for created_range in ranges:
+        for keyword in keyword_variants:
+            planned.append(
+                PlannedSearchQuery(
+                    build_search_query(
+                        search,
+                        filters,
+                        created_range=created_range,
+                        include_filter_created=False,
+                        extra_keyword=keyword,
+                    ),
+                    created_range=created_range,
+                    keyword=keyword,
+                )
+            )
+    return planned
+
+
+def build_created_ranges(start: Any, end: Any, *, interval: str = "month") -> list[CreatedRange]:
+    start_date = _parse_date_boundary(start, boundary="start")
+    end_date = _parse_date_boundary(end, boundary="end")
+    if end_date < start_date:
+        raise ValueError(f"created split end date {end_date} is before start date {start_date}")
+
+    if interval not in {"day", "month", "year"}:
+        raise ValueError("created split interval must be one of: day, month, year")
+
+    ranges: list[CreatedRange] = []
+    cursor = start_date
+    while cursor <= end_date:
+        if interval == "day":
+            range_end = cursor
+        elif interval == "month":
+            range_end = _month_end(cursor)
+        else:
+            range_end = date(cursor.year, 12, 31)
+
+        range_end = min(range_end, end_date)
+        ranges.append(CreatedRange(start=cursor, end=range_end))
+        cursor = range_end + timedelta(days=1)
+
+    return ranges
+
+
 def search_repositories(
     query: str,
     *,
@@ -94,21 +216,56 @@ def search_repositories(
     sort: str = "stars",
     order: str = "desc",
     per_page: int = 100,
-    max_results: int = 100,
+    max_results: int | None = None,
     timeout: int = 30,
     pause_seconds: float = 0.0,
 ) -> SearchResult:
-    if not query.strip():
-        raise ValueError("GitHub repository search query cannot be empty")
-
-    per_page = max(1, min(int(per_page), 100))
-    max_results = max(1, min(int(max_results), 1000))
-    pages = (max_results + per_page - 1) // per_page
     repositories: list[dict[str, Any]] = []
     total_count = 0
     incomplete_results = False
 
-    for page in range(1, pages + 1):
+    for page in iter_search_repositories(
+        query,
+        token=token,
+        sort=sort,
+        order=order,
+        per_page=per_page,
+        max_results=max_results,
+        timeout=timeout,
+        pause_seconds=pause_seconds,
+    ):
+        repositories.extend(page.repositories)
+        total_count = page.total_count
+        incomplete_results = page.incomplete_results
+
+    return SearchResult(
+        repositories=repositories,
+        total_count=total_count,
+        incomplete_results=incomplete_results,
+        query=query,
+    )
+
+
+def iter_search_repositories(
+    query: str,
+    *,
+    token: str | None = None,
+    sort: str = "stars",
+    order: str = "desc",
+    per_page: int = 100,
+    max_results: int | None = None,
+    timeout: int = 30,
+    pause_seconds: float = 0.0,
+) -> Iterator[SearchPage]:
+    if not query.strip():
+        raise ValueError("GitHub repository search query cannot be empty")
+
+    per_page = max(1, min(int(per_page), 100))
+    requested_limit = _normalise_max_results(max_results)
+    fetched_count = 0
+    page = 1
+
+    while True:
         params = {
             "q": query,
             "sort": sort,
@@ -123,19 +280,27 @@ def search_repositories(
         if not isinstance(items, list):
             raise GitHubApiError("GitHub search response did not contain an item list")
 
-        remaining_slots = max_results - len(repositories)
-        repositories.extend(items[:remaining_slots])
-        if len(repositories) >= max_results or len(items) < per_page:
+        target_count = min(total_count, requested_limit)
+        remaining_slots = max(0, target_count - fetched_count)
+        page_items = items[:remaining_slots]
+        fetched_count += len(page_items)
+
+        yield SearchPage(
+            repositories=page_items,
+            total_count=total_count,
+            incomplete_results=incomplete_results,
+            query=query,
+            page=page,
+            per_page=per_page,
+            fetched_count=fetched_count,
+            target_count=target_count,
+        )
+
+        if fetched_count >= target_count or len(items) < per_page:
             break
         if pause_seconds:
             time.sleep(pause_seconds)
-
-    return SearchResult(
-        repositories=repositories,
-        total_count=total_count,
-        incomplete_results=incomplete_results,
-        query=query,
-    )
+        page += 1
 
 
 def _request_json(
@@ -154,20 +319,35 @@ def _request_json(
         headers["Authorization"] = f"Bearer {token}"
 
     request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        message = _extract_error_message(body) or exc.reason
-        reset = exc.headers.get("X-RateLimit-Reset")
-        if exc.code == 403 and reset:
-            message = f"{message}; rate limit resets at {_format_epoch(reset)}"
-        raise GitHubApiError(f"GitHub API error {exc.code}: {message}") from exc
-    except urllib.error.URLError as exc:
-        raise GitHubApiError(f"failed to call GitHub API: {exc.reason}") from exc
-    except json.JSONDecodeError as exc:
-        raise GitHubApiError("GitHub API returned invalid JSON") from exc
+    attempts = 5
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (IncompleteRead, TimeoutError, ConnectionError, ssl.SSLError) as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            time.sleep(min(2**attempt, 8))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            message = _extract_error_message(body) or exc.reason
+            reset = exc.headers.get("X-RateLimit-Reset")
+            if exc.code == 403 and reset:
+                message = f"{message}; rate limit resets at {_format_epoch(reset)}"
+            raise GitHubApiError(f"GitHub API error {exc.code}: {message}") from exc
+        except urllib.error.URLError as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            time.sleep(min(2**attempt, 8))
+        except json.JSONDecodeError as exc:
+            raise GitHubApiError("GitHub API returned invalid JSON") from exc
+
+    if isinstance(last_error, urllib.error.URLError):
+        raise GitHubApiError(f"failed to call GitHub API: {last_error.reason}") from last_error
+    raise GitHubApiError(f"failed to read GitHub API response after retries: {last_error}") from last_error
 
 
 def _extract_error_message(body: str) -> str:
@@ -197,6 +377,30 @@ def _date_only(value: Any) -> str:
     return text
 
 
+def _in_qualifier(value: Any) -> str:
+    fields = []
+    for field in as_list(value):
+        field_text = str(field).strip().casefold()
+        if not field_text:
+            continue
+        if field_text not in REPOSITORY_SEARCH_FIELDS:
+            raise ValueError(
+                "repository search in_fields must only contain: "
+                f"{', '.join(sorted(REPOSITORY_SEARCH_FIELDS))}"
+            )
+        fields.append(field_text)
+    if not fields:
+        return ""
+    unique_fields = list(dict.fromkeys(fields))
+    return f"in:{','.join(unique_fields)}"
+
+
+def _keyword_variants(search: dict[str, Any]) -> list[str | None]:
+    variants = [str(keyword).strip() for keyword in as_list(search.get("any_keywords")) if str(keyword).strip()]
+    unique_variants = list(dict.fromkeys(variants))
+    return unique_variants or [None]
+
+
 def _quote_term(value: str) -> str:
     if value.startswith('"') and value.endswith('"'):
         return value
@@ -218,3 +422,30 @@ def _format_epoch(value: str) -> str:
         return datetime.fromtimestamp(int(value)).isoformat()
     except (TypeError, ValueError, OSError):
         return value
+
+
+def _normalise_max_results(value: Any) -> int:
+    if value in (None, "", "all"):
+        return MAX_SEARCH_RESULTS
+    return max(1, min(int(value), MAX_SEARCH_RESULTS))
+
+
+def _parse_date_boundary(value: Any, *, boundary: str) -> date:
+    if value in (None, ""):
+        raise ValueError("date value cannot be empty")
+    text = str(value).strip()
+    if len(text) == 7:
+        year, month = map(int, text.split("-", 1))
+        parsed = date(year, month, 1)
+        if boundary == "end":
+            return _month_end(parsed)
+        return parsed
+    if len(text) >= 10:
+        return date.fromisoformat(text[:10])
+    raise ValueError(f"date must be YYYY-MM or YYYY-MM-DD: {text}")
+
+
+def _month_end(value: date) -> date:
+    if value.month == 12:
+        return date(value.year, 12, 31)
+    return date(value.year, value.month + 1, 1) - timedelta(days=1)

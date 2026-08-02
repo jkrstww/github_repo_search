@@ -123,5 +123,17 @@ def write_jsonl(
     return WriteSummary(path=jsonl_path, inserted=inserted, updated=updated, total=len(merged))
 
 
+def overwrite_jsonl(path: str | Path, records: list[dict[str, Any]]) -> WriteSummary:
+    jsonl_path = Path(path)
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with jsonl_path.open("w", encoding="utf-8") as fp:
+        for record in records:
+            fp.write(_dumps(record))
+            fp.write("\n")
+
+    return WriteSummary(path=jsonl_path, inserted=len(records), updated=0, total=len(records))
+
+
 def _dumps(record: dict[str, Any]) -> str:
     return json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
