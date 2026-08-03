@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 1. GitHub Repo Filter | 已实现 | 搜索并筛选适合构造 benchmark 的 HarmonyOS 仓库 |
 | 2.1 ArkTS AST 错误实例构造 | 已实现 | 基于 AST 自动注入错误并生成修复任务 instance |
-| 2.2 新特性开发实例构造 | 规划中 | 基于真实仓库构造新功能开发任务 |
+| 2.2 新特性开发实例构造 | 已实现 | 基于抽象接口/基类及多个实现文件构造新功能开发任务 |
 | 2.3 应用迁移实例构造 | 规划中 | 构造应用、API 或版本迁移任务 |
 | 2.4 仓库 Issue 解决实例构造 | 规划中 | 基于真实 Issue 构造问题修复任务 |
 
@@ -181,6 +181,78 @@ typescript_all_language True
 typescript_unique_full_name True
 ```
 
+#### HarmonyOS/ArkTS 项目结构筛选
+
+`language == "TypeScript"` 只能筛选 GitHub 识别出的主语言，搜索关键词中的 `Harmony` 也可能表示与 HarmonyOS 无关的普通英文概念。为了排除普通 TypeScript 项目，可以继续通过 GitHub API 检查仓库文件树：
+
+```powershell
+python filter_harmony_repositories.py `
+  data/repositories_harmony_stars_gt10_language_typescript.jsonl `
+  --workers 16 `
+  --timeout 45
+```
+
+脚本优先从环境变量 `GITHUB_TOKEN` 读取 Token，未设置时会读取当前目录 `.env` 中的同名配置。默认输出：
+
+```text
+data/repositories_harmony_stars_gt10_language_typescript_harmonyos_arkts.jsonl
+```
+
+结构筛选使用以下证据：
+
+- ArkTS 源码：仓库文件树中存在 `.ets` 文件。
+- HarmonyOS 构建标记：`build-profile.json5`、`hvigorfile.ts`、`oh-package.json5`、`AppScope/app.json5`、`module.json5`、`hvigor-config.json5`。
+- 辅助元数据关键词：`ArkTS`、`ArkUI`、`HarmonyOS`、`OpenHarmony`、`OHOS`、`鸿蒙`。单独出现泛化关键词 `Harmony` 不作为 HarmonyOS 证据。
+
+每条保留记录会新增 `harmony_project` 字段，包含置信等级、`.ets` 文件数量、命中的构建标记、元数据关键词和 GitHub 文件树是否被截断。置信等级规则如下：
+
+- `high`：存在 `.ets` 文件，并且命中至少两个 HarmonyOS 构建标记。
+- `medium`：存在 `.ets`、至少一个构建标记和明确的 HarmonyOS 元数据关键词；或者命中至少三个构建标记和明确的元数据关键词。
+- `low`：存在 `.ets` 和明确的 HarmonyOS 元数据关键词，但没有构建标记，通常属于源码示例、编辑器插件或不完整工程。
+- `none`：不满足以上条件，通常是因为泛化的 `Harmony` 关键词被搜索命中。
+
+默认只保留 `medium` 和 `high`。如需包含源码示例，可以使用 `--min-confidence low`；如需保存未通过记录及其证据，可以使用 `--rejected-output <path>`。
+
+2026-08-03 的筛选结果：
+
+```text
+repositories_harmony_stars_gt10_language_typescript.jsonl: 253
+repositories_harmony_stars_gt10_language_typescript_harmonyos_arkts.jsonl: 122
+high confidence: 121
+medium confidence: 1
+GitHub tree inspection error: 1
+```
+
+本次有一个仓库因为 GitHub 文件树响应不完整而未能检查，未计入 122 个保留结果；重新运行命令会再次尝试该仓库。
+
+#### GPT 仓库语义复核
+
+对拥有 merged PR 的候选仓库继续进行仓库级语义复核，输入文件为：
+
+```text
+data/repositories_harmony_stars_gt10_language_typescript_harmonyos_arkts_PR_merged.jsonl
+```
+
+复核同时检查 GitHub 仓库描述、README 和根目录，采用以下判定规则：
+
+- 仓库主体是 HarmonyOS 应用、组件库、SDK、开发工具或迁移工具时保留。
+- 跨平台或 monorepo 仓库只要包含 README 明确说明且实际维护的 HarmonyOS 客户端、SDK 或子项目，也视为与 HarmonyOS 相关并保留。
+- 仅出现泛化的 `Harmony` 关键词、偶然的 ArkTS 文件、生成产物或不构成实际 HarmonyOS 项目的示例时剔除。
+
+2026-08-03 的语义复核结果：
+
+```text
+输入仓库：34
+保留仓库：34
+剔除仓库：0
+```
+
+全部候选均能确认 HarmonyOS 归属。包括 `cropflre/nowen-note` 和 `botiverse/hands` 这类主体为跨平台产品的仓库，其 README 和目录中也分别存在实际维护的 HarmonyOS 客户端或 ArkTS SDK，因此没有作为无关仓库删除。过滤结果保存至：
+
+```text
+data/repositories_harmony_stars_gt10_language_typescript_harmonyos_arkts_PR_merged_gpt_filter.jsonl
+```
+
 ### 1.7 诊断空结果
 
 如果 GitHub 搜索有返回，但 JSONL 仍然没有记录，可以打印前几条本地过滤原因：
@@ -214,15 +286,38 @@ wsl bash -lc "python3 tools/parse_arkts_syntax_tree.py test_project/Wechat_Harmo
 
 #### 错误实例构造
 
-项目可以基于已提取的 ArkTS 抽象语法树，自动筛选高调用出度且返回值被多个跨文件函数消费的函数，在隔离仓库快照中注入返回值错误，并生成 `bug.patch`、`fix.patch` 和包含下游消费者描述的 `instance.json`。原始 clone 不会被修改。
+项目可以基于已提取的 ArkTS 抽象语法树，自动筛选高调用出度且返回值被多个跨文件函数消费的函数，通过 `bug.patch` 表达返回值错误，并生成 `fix.patch`、`syntax_tree.jsonl` 和包含下游消费者描述的 `instance.json`。生成目录不复制仓库，原始 clone 也不会被修改。
 
-当前 Wechat 示例选择 `PermissionUtils.request`，将 `return isAuth` 变异为 `return false`，生成的实例位于 `instances/wechat-permission-request-return-false/`。
+当前 Wechat 示例选择 `PermissionUtils.request`，将 `return isAuth` 变异为 `return false`，生成的实例位于 `instances/error_fix/wechat-permission-request-return-false/`。
 
 完整的分析规则、注入流程、命令参数、instance 格式、验证方式和已知边界见 [ArkTS AST 错误实例构造文档](src/arkts_syntax_tree/README.md)。
 
-### 2.2 新特性开发实例构造（规划中）
+### 2.2 新特性开发实例构造
 
-面向真实 HarmonyOS 仓库构造尚未实现的新功能任务。计划从基线仓库快照、功能需求、受影响模块和验收条件生成 instance，用测试或其他可执行检查判断功能是否正确实现。目前尚未实现自动生成脚本。
+面向真实 HarmonyOS 仓库构造尚未实现的新功能任务。生成器会发现 `interface` 或拥有派生实现的基类，并要求至少存在两个实现/使用文件；其中支持显式的 `implements`/`extends`，接口还支持 ArkTS 常见的结构化使用。输出包括基线仓库快照、功能需求、受影响模块和静态结构验收条件。
+
+列出 `test_project` 中的候选抽象节点：
+
+```powershell
+PYTHONPATH=src python tools/build_feature_instance.py `
+  test_project/Wechat_HarmonyOS --list
+```
+
+构造新特性开发 instance：
+
+```powershell
+PYTHONPATH=src python tools/build_feature_instance.py `
+  test_project/Wechat_HarmonyOS
+```
+
+验证开发后的 instance：
+
+```powershell
+PYTHONPATH=src python tools/verify_feature_instance.py \
+  instances/feature_implement/wechat_harmonyos-chatcontentitemdata-new-implementation
+```
+
+生成的目录包含 `repo/`、`instance.json` 和面向开发者的 `task.md`。默认保存在 `instances/feature_implement/`，基线快照不会修改原始仓库。错误修复实例则统一保存在 `instances/error_fix/`。
 
 ### 2.3 应用迁移实例构造（规划中）
 
@@ -230,7 +325,104 @@ wsl bash -lc "python3 tools/parse_arkts_syntax_tree.py test_project/Wechat_Harmo
 
 ### 2.4 仓库 Issue 解决实例构造（规划中）
 
-面向公开仓库中的真实 Issue 构造问题修复任务。计划关联 Issue 描述、对应基线 commit、错误复现信息、相关代码范围和验证条件，使生成的 instance 能够复现并检查 Issue 是否被正确解决。目前尚未实现自动生成脚本。
+面向公开仓库中的真实 Issue 和对应 Pull Request 构造问题修复任务。计划关联 Issue 描述、PR 的 base commit、gold patch、测试变更和验证条件，使生成的 instance 能够复现并检查 Issue 是否被正确解决。目前尚未实现 HarmonyOS 专用的自动生成脚本，后续将复用 `src/SWE-bench/swebench/collect/` 中的 PR 采集和 instance 构造逻辑。
+
+#### 过滤后仓库的 PR 分布
+
+2026-08-03 使用 GitHub GraphQL API 对以下最新过滤结果进行统计：
+
+```text
+data/repositories_harmony_stars_gt10_language_typescript_harmonyos_arkts.jsonl
+```
+
+该文件包含 122 个 high/medium 置信的 HarmonyOS/ArkTS 仓库，全部能够正常查询 PR。PR 状态分布如下：
+
+| 状态 | PR 数量 | 占比 |
+| --- | ---: | ---: |
+| Open | 32 | 1.9% |
+| Closed、未合并 | 177 | 10.5% |
+| Merged | 1,469 | 87.5% |
+| 合计 | 1,678 | 100% |
+
+仓库级统计：
+
+- 有 PR 的仓库：41（33.6%）。
+- 没有 PR 的仓库：81（66.4%）。
+- 每仓库平均 PR 数：13.75；中位数：0。
+- P75、P90、P95：1、5.9、52.3。
+- 单仓库最大 PR 数：401。
+
+总 PR 数量的仓库分布：
+
+| 单仓库 PR 数 | 仓库数 | 占比 |
+| --- | ---: | ---: |
+| 0 | 81 | 66.4% |
+| 1-5 | 28 | 23.0% |
+| 6-10 | 4 | 3.3% |
+| 11-25 | 2 | 1.6% |
+| 26-50 | 0 | 0% |
+| 51-100 | 2 | 1.6% |
+| 101-250 | 2 | 1.6% |
+| 251-500 | 3 | 2.5% |
+
+按 merged PR 数量统计，可用于后续 Issue/PR instance 构造的仓库规模为：
+
+| 条件 | 仓库数 |
+| --- | ---: |
+| merged PR >= 1 | 34 |
+| merged PR >= 5 | 11 |
+| merged PR >= 10 | 9 |
+| merged PR >= 25 | 7 |
+| merged PR >= 50 | 6 |
+
+merged PR 数量最多的仓库：
+
+| 仓库 | Merged | PR 总数 | Open | Closed、未合并 |
+| --- | ---: | ---: | ---: | ---: |
+| `botiverse/hands` | 390 | 401 | 4 | 7 |
+| `mgz0227/legado-Harmony` | 295 | 342 | 5 | 42 |
+| `cropflre/nowen-note` | 238 | 312 | 1 | 73 |
+| `Your-USTC/DailyNic_HMOS` | 176 | 179 | 0 | 3 |
+| `ohosvscode/arkTS` | 171 | 203 | 13 | 19 |
+| `Edge-Music/Community` | 63 | 72 | 0 | 9 |
+| `ibestservices/ibest-ui` | 49 | 54 | 0 | 5 |
+| `ibestservices/ibest-ui-v2` | 16 | 20 | 0 | 4 |
+| `netease-kit/nim-uikit-harmony` | 15 | 15 | 0 | 0 |
+| `wuba/omni-ui` | 7 | 7 | 0 | 0 |
+
+这些 merged PR 只是初始候选，不等同于可直接使用的 benchmark instance。按照 SWE-bench 的筛选逻辑，PR 还需要关联至少一个被解决的 Issue，并能提取非空的问题描述和 gold patch；用于评测的数据还需要包含测试代码变更。由于 122 个仓库中只有 34 个拥有 merged PR，后续可以优先从 merged PR 不少于 10 个的 9 个仓库开始采集，再检查 Issue 关联、补丁内容和测试变更。
+
+#### legado-Harmony 构造试验结论
+
+已复用 `src/SWE-bench/swebench/collect/` 对 `mgz0227/legado-Harmony` 进行实际采集和 instance 构造试验，结果保存在：
+
+```text
+instances/issue_resolve/legado-harmony-pr-349/
+```
+
+本次选择 merged PR #349 `修复错误颜色值导致的UI显示问题`。其 upstream base commit 为 `1c824edaa798635dceeac4de299093e707316bdd`，对应快照恢复在 `test_project/legado-Harmony`。生成内容包括：
+
+- `instance.json`：保留 SWE-bench 核心字段，并记录兼容性降级、commit 和 artifact 信息。
+- `fix.patch`：从 PR diff 提取的 gold patch，修改 `ReaderPage3.ets` 中 3 个错误颜色值。
+- `test.patch`：原 PR 没有测试变更，因此为空。
+- `task.md`：从 PR 标题扩展的问题描述。
+- `verify.py` 和 `validation.json`：静态验收规则及验证结果。
+- `collection/`：原始 PR JSONL、原始 SWE-bench 空输出和 ArkTS 解析摘要。
+
+验证结果：
+
+```text
+gold patch apply check: passed
+fixed static verifier: passed
+ArkTS/TS parsed files: 346
+syntax tree imports: 1274
+syntax tree nodes: 10932
+snapshot reverse apply and clean check: passed
+```
+
+严格准入检查显示，该仓库的 295 个 merged PR 中，没有 PR 使用 SWE-bench 支持的 closing Issue 方式关联独立 Issue；只有 3 个 PR 包含测试文件变更，这 3 个 PR 同样没有关联 Issue。PR #349 的 `resolved_issues=[]`，所以原始 `build_dataset` 按预期没有生成候选。
+
+为验证剩余流程，本次没有伪造 Issue 编号，而是明确采用“PR 标题作为 `problem_statement`”的兼容降级，并使用静态脚本替代缺失的测试补丁。当前环境也没有 DevEco Studio、`ohpm` 或可执行的 hvigor wrapper，因此未运行原生 HarmonyOS 构建。结论是：该实例可用于验证 HarmonyOS PR 采集、gold patch 构造和静态验收流程，但不能作为严格满足真实 Issue 关联和测试补丁要求的 SWE-bench 评测实例。完整过程见 `src/SWE-bench/README.md`。
 
 ## 开发与测试
 
