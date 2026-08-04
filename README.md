@@ -9,7 +9,7 @@
 | 1. GitHub Repo Filter | 已实现 | 搜索并筛选适合构造 benchmark 的 HarmonyOS 仓库 |
 | 2.1 ArkTS AST 错误实例构造 | 已实现 | 基于 AST 自动注入错误并生成修复任务 instance |
 | 2.2 新特性开发实例构造 | 已实现 | 基于抽象接口/基类及多个实现文件构造新功能开发任务 |
-| 2.3 应用迁移实例构造 | 规划中 | 构造应用、API 或版本迁移任务 |
+| 2.3 应用迁移实例构造 | 进行中 | 已实现基于 ArkTS AST 的 `android.*` 调用初筛 |
 | 2.4 仓库 Issue 解决实例构造 | 规划中 | 基于真实 Issue 构造问题修复任务 |
 
 ## 1. GitHub Repo Filter
@@ -319,9 +319,129 @@ PYTHONPATH=src python tools/verify_feature_instance.py \
 
 生成的目录包含 `repo/`、`instance.json` 和面向开发者的 `task.md`。默认保存在 `instances/feature_implement/`，基线快照不会修改原始仓库。错误修复实例则统一保存在 `instances/error_fix/`。
 
-### 2.3 应用迁移实例构造（规划中）
+### 2.3 应用迁移实例构造（进行中）
 
-面向 HarmonyOS 应用、SDK、API 或版本升级场景构造迁移任务。计划记录迁移前快照、目标平台或版本约束、迁移要求和验收方式，覆盖接口替换、配置调整、依赖升级和兼容性修改。目前尚未实现自动生成脚本。
+面向 HarmonyOS 应用、SDK、API 或版本升级场景构造迁移任务。最终 instance 计划记录迁移前快照、目标平台或版本约束、迁移要求和验收方式，覆盖接口替换、配置调整、依赖升级和兼容性修改。
+
+#### 第一步：基于语法树初筛 Android 调用
+
+`arkts_syntax_tree` 解析器现在会在每个文件的 JSONL 记录中增加 `calls` 字段。每条调用表达式包含规范化后的 `callee`、行号和列号；提取前会掩盖注释、普通字符串和模板字符串，因此这些非代码区域中的 `android.*` 文本不会形成调用节点。
+
+先解析目标仓库，再只使用生成的语法树 JSONL 执行检测：
+
+```powershell
+python tools/parse_arkts_syntax_tree.py test_project/legado-Harmony
+python tools/detect_android_calls.py `
+  syntax_trees/legado-Harmony_syntax_tree.jsonl
+```
+
+也可以将结构化检测报告保存到文件：
+
+```powershell
+python tools/detect_android_calls.py `
+  syntax_trees/legado-Harmony_syntax_tree.jsonl `
+  --output syntax_trees/legado-Harmony_android_calls.json
+```
+
+检测器严格匹配调用目标以 `android.` 开头的调用，例如 `android.app.Activity.start()`；可选链会被规范化，如 `android?.content?.open()` 记录为 `android.content.open`。每个命中还会利用语法树的起止行定位所在的 class、struct、function、method 或 callback 作用域。旧版 JSONL 没有 `calls` 字段时工具会要求重新解析，避免把缺失分析数据误判为零命中。
+
+#### legado-Harmony 验证
+
+`test_project/legado-Harmony` 当前 `main` 分支在提交 `9421676` 停止开源后已删除应用源码，工作区只剩一个 `hvigorfile.ts`。为了验证真实迁移代码，本次从同一测试仓库导出删除源码前的提交 `af6fda1`，不切换或修改测试仓库工作区：
+
+```powershell
+$source = Join-Path $env:TEMP "legado-Harmony-af6fda1"
+$archive = Join-Path $env:TEMP "legado-Harmony-af6fda1.zip"
+
+git -c safe.directory=D:/Project/HarmonyOS-benchmark/test_project/legado-Harmony `
+  -C test_project/legado-Harmony archive `
+  --format=zip --output=$archive af6fda1
+Expand-Archive -LiteralPath $archive -DestinationPath $source
+
+python tools/parse_arkts_syntax_tree.py $source `
+  --output syntax_trees/legado-Harmony_af6fda1_syntax_tree.jsonl `
+  --summary syntax_trees/legado-Harmony_af6fda1_syntax_tree_summary.json
+python tools/detect_android_calls.py `
+  syntax_trees/legado-Harmony_af6fda1_syntax_tree.jsonl
+```
+
+2026-08-03 的验证结果：
+
+```text
+files: 346
+imports: 1277
+nodes: 10935
+calls_scanned: 18683
+android_call_count: 0
+files_with_android_calls: []
+```
+
+源码中出现的 Android 文本位于注释、User-Agent 字符串和界面选项字符串中，均不属于调用表达式，因此零命中符合预期。专项测试可通过以下命令运行：
+
+```powershell
+python -m unittest tests.test_syntax_tree tests.test_migration -v
+```
+
+#### 批量扫描候选仓库
+
+以下脚本用于扫描 `repositories_harmony_stars_gt10_language_typescript_PR_merged.jsonl` 中的全部仓库：
+
+```powershell
+python tools/scan_android_repositories.py
+```
+
+默认行为如下：
+
+- 从 `data/repositories_harmony_stars_gt10_language_typescript_PR_merged.jsonl` 读取仓库；
+- 使用仓库的 `default_branch` 执行 `git clone --depth 1 --single-branch --no-tags`；
+- clone 到系统临时目录中的独立子目录，解析 `.ets` 和 `.ts` 后执行 `android.*(...)` 检测；
+- 无论 clone、解析或检测成功还是失败，都在单仓库任务结束时删除该临时子目录；
+- 默认并行处理 4 个仓库，每条结果完成后立即写入 `data/repositories_harmony_stars_gt10_language_typescript_PR_merged_android_calls.jsonl`；
+- 再次运行时跳过输出中 `status=ok` 的仓库并重试错误记录，可以从中断位置继续。
+
+先用少量仓库验证网络和环境：
+
+```powershell
+python tools/scan_android_repositories.py `
+  --max-repos 2 `
+  --workers 1 `
+  --clone-root .tmp/android-call-scan `
+  --overwrite
+```
+
+完整扫描并自定义超时、并发数和输出位置：
+
+```powershell
+python tools/scan_android_repositories.py `
+  data/repositories_harmony_stars_gt10_language_typescript_PR_merged.jsonl `
+  --output data/repositories_android_calls.jsonl `
+  --workers 4 `
+  --clone-timeout 300
+```
+
+每条输出记录包含仓库名、实际扫描 commit、状态、文件数、调用总数、`android_call_count`、命中文件及带源码位置和作用域的调用列表。单个仓库失败时记录 `error.stage` 和 `error.message`，批处理继续运行；全部完成但存在错误时脚本退出码为 2。
+
+2026-08-03 使用 `--max-repos 1 --workers 1` 完成联网烟雾测试：`751496032/DSBridge-HarmonyOS` 在 commit `3de1a9f382411f8508c74c37bfc4f638c8573a6a` 上解析 28 个文件、719 个调用表达式，`android_call_count=0`，任务结束后临时 clone 目录为空。
+
+随后对 `repositories_harmony_stars_gt10_language_typescript.jsonl` 执行批量扫描。该文件实际包含 253 条仓库记录；按操作要求停止最后一个耗时仓库 `MinamiJogen/HarmonyOS-EhViewer` 后，最终结果为：
+
+```text
+completed repositories: 252
+successful repositories: 252
+errors: 0
+ArkTS/TS files scanned: 39668
+call expressions scanned: 2299939
+repositories with android.* calls: 0
+android.* calls: 0
+not scanned: MinamiJogen/HarmonyOS-EhViewer
+temporary clone directories remaining: 0
+```
+
+结果保存在 `data/repositories_harmony_stars_gt10_language_typescript_android_calls.jsonl`。其中包含 252 条唯一仓库记录及各自的扫描 commit；由于最后一个仓库未生成结果，该文件不应视为完整 253 仓库扫描结果。
+
+不执行 `git clone` 的替代方案是下载 GitHub/codeload 的 branch zip archive。它仍需临时解压源码，但不下载 `.git` 和历史对象，通常比浅克隆占用更少；如果希望完全不落盘，也可以使用 Git Trees API 获取文件树，再通过 Git Blobs API 只读取 `.ets`/`.ts` 内容并在内存解析。后者的 API 请求数和 rate limit 成本更高，对 34 个仓库批量扫描时，浅克隆或 archive 通常更稳定。GitHub Code Search 不保证完整索引，也无法可靠排除注释和字符串，不适合作为本检测的替代。
+
+当前初筛只覆盖 `.ets` 和 `.ts` 中直接以 `android.` 开头的静态调用，不展开别名、动态属性、反射，也不扫描 Java/Kotlin 源码。后续构造迁移 instance 时，需要在此结果上继续关联 Android API 与 HarmonyOS 替代 API、迁移前快照及可执行验收条件。
 
 ### 2.4 仓库 Issue 解决实例构造（规划中）
 
