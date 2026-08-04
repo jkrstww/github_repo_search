@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"parsed files={result['files']} nodes={result['nodes']} imports={result['imports']} "
-        f"max_depth={result['max_depth']} output={output} summary={summary}"
+        f"calls={result['calls']} max_depth={result['max_depth']} output={output} summary={summary}"
     )
     return 0
 

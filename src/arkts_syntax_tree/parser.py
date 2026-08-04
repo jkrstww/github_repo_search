@@ -53,12 +53,14 @@ class ParsedFile:
     imports: list[dict[str, Any]]
     tree: SyntaxNode
     metrics: dict[str, Any]
+    calls: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
             "language": self.language,
             "imports": self.imports,
+            "calls": self.calls,
             "tree": self.tree.to_dict(),
             "metrics": self.metrics,
         }
@@ -102,6 +104,7 @@ def parse_source(source: str, *, path: str) -> ParsedFile:
     original_lines = source.splitlines()
     masked_lines = masked.splitlines()
     imports = extract_imports(source)
+    calls = extract_calls(source)
     root = SyntaxNode(
         type="file",
         name=path,
@@ -145,8 +148,9 @@ def parse_source(source: str, *, path: str) -> ParsedFile:
         path=path,
         language=language_for_path(path),
         imports=imports,
+        calls=calls,
         tree=root,
-        metrics=build_metrics(root, imports),
+        metrics=build_metrics(root, imports, calls),
     )
 
 
@@ -178,10 +182,12 @@ def write_syntax_tree_outputs(
 def build_repository_summary(parsed_files: list[ParsedFile], *, output_path: Path | None = None) -> dict[str, Any]:
     node_types: Counter[str] = Counter()
     total_imports = 0
+    total_calls = 0
     total_nodes = 0
     max_depth = 0
     for parsed_file in parsed_files:
         total_imports += len(parsed_file.imports)
+        total_calls += len(parsed_file.calls)
         total_nodes += parsed_file.metrics["nodes"]
         max_depth = max(max_depth, parsed_file.metrics["max_depth"])
         node_types.update(parsed_file.metrics["node_types"])
@@ -189,6 +195,7 @@ def build_repository_summary(parsed_files: list[ParsedFile], *, output_path: Pat
     summary: dict[str, Any] = {
         "files": len(parsed_files),
         "imports": total_imports,
+        "calls": total_calls,
         "nodes": total_nodes,
         "max_depth": max_depth,
         "node_types": dict(sorted(node_types.items())),
@@ -212,6 +219,28 @@ def extract_imports(source: str) -> list[dict[str, Any]]:
             }
         )
     return imports
+
+
+def extract_calls(source: str) -> list[dict[str, Any]]:
+    """Extract lightweight call expressions while preserving source locations."""
+    masked = mask_non_code(source)
+    calls: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"(?<![\w$])"
+        r"(?P<callee>[A-Za-z_$][\w$]*(?:\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*)*)"
+        r"\s*\("
+    )
+    for match in pattern.finditer(masked):
+        callee = re.sub(r"\s+", "", match.group("callee")).replace("?.", ".")
+        line_start = masked.rfind("\n", 0, match.start("callee")) + 1
+        calls.append(
+            {
+                "line": masked.count("\n", 0, match.start("callee")) + 1,
+                "column": match.start("callee") - line_start + 1,
+                "callee": callee,
+            }
+        )
+    return calls
 
 
 def detect_node(
@@ -414,7 +443,11 @@ def mask_non_code(source: str) -> str:
     return "".join(result)
 
 
-def build_metrics(root: SyntaxNode, imports: list[dict[str, Any]]) -> dict[str, Any]:
+def build_metrics(
+    root: SyntaxNode,
+    imports: list[dict[str, Any]],
+    calls: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     node_types: Counter[str] = Counter()
     max_depth = 0
 
@@ -430,6 +463,7 @@ def build_metrics(root: SyntaxNode, imports: list[dict[str, Any]]) -> dict[str, 
 
     return {
         "imports": len(imports),
+        "calls": len(calls or []),
         "nodes": visit(root, 0),
         "max_depth": max_depth,
         "node_types": dict(sorted(node_types.items())),

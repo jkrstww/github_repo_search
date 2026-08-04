@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from arkts_syntax_tree import parse_source
+from arkts_syntax_tree import build_repository_summary, parse_source
 
 
 class SyntaxTreeParserTest(unittest.TestCase):
@@ -37,6 +37,9 @@ struct Index {
 
         self.assertEqual(parsed.language, "ArkTS")
         self.assertEqual(parsed.imports[0]["source"], "@ohos.router")
+        self.assertIn("router.pushUrl", [call["callee"] for call in parsed.calls])
+        self.assertEqual(parsed.metrics["calls"], len(parsed.calls))
+        self.assertEqual(build_repository_summary([parsed])["calls"], len(parsed.calls))
         self.assertEqual(struct.type, "struct")
         self.assertEqual(struct.name, "Index")
         self.assertEqual(struct.decorators, ["@Entry", "@Component"])
