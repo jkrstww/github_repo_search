@@ -5,9 +5,9 @@
 | 类型 | 目标 | 默认输出目录 | 基线形式 | 验收方式 |
 | --- | --- | --- | --- | --- |
 | ArkTS AST 错误实例构造 | 注入可定位、可恢复的返回值错误，形成修复任务 | `instances/error_fix/` | `bug.patch` 与 `fix.patch` | 补丁、构建和测试 |
-| 新特性开发实例构造 | 基于已有抽象接口或基类，要求开发一种新的实现 | `instances/feature_implement/` | 完整仓库快照 `repo/` | 静态结构验收 |
+| 接口/基类实现补全实例构造 | mask 一个已有实现文件，要求智能体在原路径补全 | `instances/feature_implement/` | `mask.patch` 与 `gold.patch` | 静态结构验收与 gold patch |
 
-两类任务共享 `parser.py` 提取的 ArkTS/ETS 结构信息，但任务目标和 instance 产物不同。错误实例不会复制原始仓库，错误代码通过补丁表达；新特性实例会复制一份未修改的基线仓库，供开发者直接实现功能。
+两类任务共享 `parser.py` 提取的 ArkTS/ETS 结构信息，且都不保存仓库副本。错误实例通过 `bug.patch`/`fix.patch` 表达错误注入和修复；实现补全实例通过 `mask.patch`/`gold.patch` 表达实现遮蔽和参考答案。
 
 ## 1. ArkTS AST 错误实例构造
 
@@ -207,26 +207,26 @@ patch --dry-run -p1 -i ../instances/error_fix/<instance-id>/fix.patch
 
 因此，生成 instance 后仍应结合 `fix.patch` dry-run、项目构建和测试结果进行最终确认。
 
-## 2. 新特性开发实例构造
+## 2. 接口/基类实现补全实例构造
 
-新特性开发实例面向“在现有抽象能力上增加一种实现”的开发任务。它不会向仓库注入错误，也不提供参考修复补丁，而是保存一份原始基线仓库，并通过已有实现文件和静态验收条件约束开发范围。
+该任务从真实仓库中选择一个已有多个实现或使用文件的 `interface`/`class`，为其中一个实现文件生成整文件 mask patch，要求智能体在独立仓库副本上应用 patch 后，参考抽象定义和其他实现文件补全实现。instance 不保存仓库；原始实现以 `gold.patch` 的形式作为 benchmark gold label。
 
 ### 2.1 模块组成
 
-- `feature_instance.py`：发现抽象节点及其实现/使用文件，生成仓库快照、任务描述、元数据，并执行静态结构验收。
+- `feature_instance.py`：发现抽象节点及其实现/使用文件，选择 mask 目标，生成双向 patch、语法树、任务描述和验收元数据。
 - `parser.py`：直接解析目标仓库，或为外部传入的语法树 JSONL 提供结构数据。
-- `../../tools/build_feature_instance.py`：列出候选节点或生成新特性开发 instance。
-- `../../tools/verify_feature_instance.py`：验证开发后的仓库是否新增了符合要求的实现文件。
-- `../../tests/test_feature_instance.py`：覆盖显式继承、结构化使用、导入别名、同名接口隔离、实例生成和验收逻辑。
+- `../../tools/build_feature_instance.py`：列出候选节点或生成实现补全 instance。
+- `../../tools/verify_feature_instance.py`：验证被 mask 的文件是否已补全并恢复实现关系。
+- `../../tests/test_feature_instance.py`：覆盖候选发现、mask、gold patch、等价实现和精确 gold 匹配。
 
 ### 2.2 候选抽象节点
 
-`find_feature_candidates()` 从语法树中收集 `interface` 和 `class` 节点，再查找位于其他源码文件中的实现或使用关系。默认只保留至少关联两个实现/使用文件的节点。
+`find_feature_candidates()` 从语法树中收集 `interface` 和 `class` 节点，再查找位于其他源码文件中的真实实现或派生关系。默认只保留至少关联两个 `implements`/`extends` 文件的节点。
 
-支持两类关系：
+支持两类关系，其中默认只启用第一类：
 
 1. **显式继承或实现**：源码中的 `class` 或 `struct` 通过 `implements` 或 `extends` 使用目标抽象节点；
-2. **接口结构化使用**：文件从目标接口的定义文件导入该接口，并在 import 之外的实际代码中再次使用该类型。
+2. **接口结构化使用**：文件从目标接口的定义文件导入该接口，并在 import 之外的实际代码中再次使用该类型；该模式需要显式传入 `include_structural_usage=True` 或 CLI 参数 `--include-structural-usage`，不再作为 `feature_implement` 默认候选。
 
 候选关联遵循以下规则：
 
@@ -271,7 +271,28 @@ python3 tools/build_feature_instance.py \
 - 实现/使用文件数量；
 - 每个文件的关系类型、导入后的本地名称以及文件内的 `class`/`struct` 声明。
 
-### 2.4 生成 instance
+### 2.4 Mask 目标选择
+
+候选确定后，生成器从该候选的实现/使用文件中选择一个文件进行 mask。排序规则依次为：
+
+1. 优先选择包含 `class` 或 `struct` 声明的文件；
+2. 优先选择显式 `implements`/`extends` 文件；
+3. 最后按文件路径排序，保证结果可复现。
+
+Mask 采用整文件遮蔽。`mask.patch` 会把目标文件替换为仅包含目标抽象节点和预期声明名称的注释占位符，例如：
+
+```ts
+// CODE BENCHMARK MASK
+// Restore the implementation for: ChatContentItemData
+// Expected declarations: ListChatContentLeftItem
+```
+
+原文件内容保持在源仓库中，不会被修改。生成器同时创建两个统一 diff：
+
+- `mask.patch`：原文件内容 → mask 内容，用于构造待解决基线；
+- `gold.patch`：mask 内容 → 原文件内容，作为 gold label。
+
+### 2.5 生成 instance
 
 使用默认输出目录生成 instance：
 
@@ -283,14 +304,15 @@ python3 tools/build_feature_instance.py test_project/Wechat_HarmonyOS
 
 ```text
 instances/feature_implement/<instance-id>/
-├── repo/          # 未修改的基线仓库快照
-├── instance.json  # 候选、需求和静态验收元数据
-└── task.md        # 面向开发者的任务说明
+├── mask.patch        # 原实现 -> mask 内容
+├── gold.patch        # mask 内容 -> 原实现的 gold label
+├── syntax_tree.jsonl # 构造时使用的 ArkTS 结构信息
+└── instance.json     # 候选、任务描述、mask 和验收元数据
 ```
 
-生成器使用 `shutil.copytree()` 保存仓库快照，同时跳过 `.git`、`.hvigor`、`.idea`、`.preview`、`.vscode`、`build`、`node_modules` 和 `oh_modules` 等版本控制、依赖或构建目录。原始仓库不会被修改。
+该格式与 2.1 错误实例一致，通过补丁表达代码变化，不复制或修改原始仓库。评测环境需要根据 `source_repo.commit` 准备独立仓库副本，再应用 `mask.patch` 构造任务基线。
 
-输出目录必须位于源仓库之外，且目标 instance 目录不能已经存在。自定义 `instance-id` 只能包含字母、数字、点、下划线和连字符，避免生成到输出目录之外。
+输出目录必须位于源仓库之外，且目标 instance 目录不能已经存在。默认 instance ID 使用 `<仓库名>-<随机 UUID>`，例如 `Wechat_HarmonyOS-550e8400-e29b-41d4-a716-446655440000`。自定义 `instance-id` 仍只能包含字母、数字、点、下划线和连字符。
 
 主要参数：
 
@@ -298,58 +320,86 @@ instances/feature_implement/<instance-id>/
 | --- | --- | --- |
 | `--syntax-tree` | 不指定 | 语法树 JSONL；省略时直接解析仓库 |
 | `--output` / `--output-dir` | `instances/feature_implement` | instance 父目录 |
-| `--instance-id` | 自动生成 | instance 目录名 |
+| `--instance-id` | `<仓库名>-<随机 UUID>` | instance 目录名 |
 | `--min-implementations` | `2` | 候选至少关联的实现/使用文件数 |
+| `--include-structural-usage` | 关闭 | 允许把仅导入并使用 interface 类型的文件作为候选 |
 | `--list` | 关闭 | 只输出候选 JSON，不生成 instance |
 
-### 2.5 Instance 元数据
+### 2.6 Instance 元数据
 
 `instance.json` 的核心字段包括：
 
 | 字段 | 内容 |
 | --- | --- |
-| `task_type` | 固定为 `new_feature_development` |
-| `source_repo` | 原仓库路径和 Git commit |
-| `snapshot.repo` | 基线仓库快照位置 |
+| `task_type` | 固定为 `feature_implementation` |
+| `source_repo` | 原仓库名称、规范化 GitHub URL 和 Git commit |
 | `target.abstract_node` | 目标接口或基类信息 |
 | `target.implementation_files` | 基线实现/使用文件及关系类型 |
-| `feature_request` | 功能标题、任务描述和最低实现文件数量 |
-| `affected_modules` | 可供开发者参考的现有实现/使用文件 |
+| `mask` | mask 文件、关系类型、预期声明以及 mask 前后 SHA-256 |
+| `description` | 面向智能体的实现补全任务描述 |
+| `reference_implementation_files` | 未被 mask、可供参考的其他实现文件 |
+| `patches` | `mask.patch` 和 `gold.patch` 路径 |
+| `gold_label` | `gold.patch` 的类型、路径和应用根目录 |
+| `affected_modules` | 抽象定义、mask 文件和参考实现文件 |
 | `acceptance.checks` | 静态结构验收条件 |
 
-假设基线包含三个实现/使用文件，生成的需求会把 `required_implementation_file_count` 设置为 4，要求开发者新增一个独立源码文件，而不是只修改现有实现。
-
-`task.md` 会明确说明目标抽象节点、现有参考文件和以下验收要求：
+`description` 会明确说明目标抽象节点、mask 文件和现有参考文件。任务要求包括：
 
 - 保留目标抽象节点；
-- 实现/使用文件总数达到基线数量加一；
-- 至少出现一个不在基线列表中的新源码文件；
-- 保持现有实现的对外行为不变。
+- 在原路径补全被 mask 的文件；
+- 恢复原文件中的 `class`/`struct` 声明；
+- 恢复目标接口或基类的实现/使用关系；
+- 不修改其他现有实现的对外行为。
 
-### 2.6 静态结构验收
+### 2.7 Gold patch
 
-开发者在 instance 的 `repo/` 中完成实现后，可以运行：
+`gold.patch` 是从 mask 后内容恢复到原文件内容的统一 diff：
+
+```text
+--- a/<masked-path>
++++ b/<masked-path>
+@@ ...
+-// CODE BENCHMARK MASK
++<original implementation>
+```
+
+两个 patch 的应用根目录都是目标仓库副本。`gold.patch` 是参考答案，不要求智能体提交内容与原文件逐字相同；验证器允许结构上等价的实现通过，同时通过 `matches_gold` 字段报告当前文件是否与原实现的 SHA-256 完全一致。
+
+### 2.8 静态结构验收
+
+准备任务基线：
+
+```bash
+cd <独立仓库副本>
+patch --dry-run -p1 -i <instance-dir>/mask.patch
+patch -p1 -i <instance-dir>/mask.patch
+```
+
+智能体在该仓库副本中完成实现后，可以运行：
 
 ```bash
 python3 tools/verify_feature_instance.py \
-  instances/feature_implement/<instance-id>
+  instances/feature_implement/<instance-id> \
+  <独立仓库副本>
 ```
 
-`verify_feature_instance()` 会重新解析快照仓库并分别检查：
+`verify_feature_instance()` 接收 instance 目录和外部工作仓库，重新解析工作仓库并分别检查：
 
 1. `abstract_node_exists`：原接口或基类仍然存在，路径、节点类型和名称保持一致；
-2. `implementation_file_count`：当前实现/使用文件数量达到需求中的最低值；
-3. `new_implementation_file`：至少有一个实现文件不在基线文件列表中。
+2. `masked_file_exists`：被 mask 的原路径仍然存在；
+3. `masked_file_changed`：文件内容不再是生成器写入的 mask 占位符；
+4. `implementation_relation_restored`：该文件重新形成目标抽象节点的实现或结构化使用关系；
+5. `expected_declarations_restored`：原文件中的 `class`/`struct` 声明已经恢复。
 
-三个检查全部通过时返回 `passed: true`，CLI 退出码为 0；否则返回 `passed: false`，CLI 退出码为 1。刚生成但尚未开发的基线 instance 验证失败是预期行为，因为此时还没有新增实现文件。
+所有检查通过时返回 `passed: true`，CLI 退出码为 0；否则返回 `passed: false`，CLI 退出码为 1。刚生成的 instance 验证失败是预期行为，因为目标文件仍然是 mask 内容。`matches_gold: true` 表示文件与原实现完全一致；等价实现可以在 `matches_gold: false` 时通过静态验收。
 
-当前示例位于：
+生成后的示例目录名形如：
 
 ```text
-instances/feature_implement/wechat_harmonyos-chatcontentitemdata-new-implementation/
+instances/feature_implement/Wechat_HarmonyOS-<uuid>/
 ```
 
-### 2.7 Python API
+### 2.9 Python API
 
 ```python
 from arkts_syntax_tree import (
@@ -361,6 +411,7 @@ from arkts_syntax_tree import (
 candidates = find_feature_candidates(
     "test_project/Wechat_HarmonyOS",
     min_implementation_files=2,
+    include_structural_usage=True,
 )
 
 metadata = create_feature_instance(
@@ -369,14 +420,14 @@ metadata = create_feature_instance(
 )
 
 result = verify_feature_instance(
-    "instances/feature_implement/"
-    "wechat_harmonyos-chatcontentitemdata-new-implementation"
+    "instances/feature_implement/Wechat_HarmonyOS-<uuid>",
+    "/tmp/Wechat_HarmonyOS-working",
 )
 ```
 
-### 2.8 验证测试
+### 2.10 验证测试
 
-运行新特性实例专项测试：
+运行实现补全实例专项测试：
 
 ```bash
 PYTHONPATH=src python3 -m unittest tests.test_feature_instance -v
@@ -388,11 +439,36 @@ PYTHONPATH=src python3 -m unittest tests.test_feature_instance -v
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-### 2.9 当前边界
+### 2.11 当前边界
 
 - 当前只扫描 `.ets` 和 `.ts` 文件；
 - import 解析以相对路径为主，不解析工程路径别名、动态 import 或跨包 re-export；
 - 显式关系通过源码结构模式识别，不等价于完整 TypeScript/ArkTS 类型检查；
 - 接口结构化使用以“正确导入并在有效代码中再次引用”为判断依据，不能证明对象完整实现了接口中的所有成员；
-- 静态验收确认新增文件和结构关系，不检查业务语义、UI 效果、运行时行为或性能；
+- mask 当前采用整文件替换，不在 mask 后基线中保留原文件的 imports、局部实现或注释；
+- 静态验收确认声明和结构关系，不检查业务语义、UI 效果、运行时行为或性能；
 - 生成器不会自动运行目标 HarmonyOS 工程的构建和测试，最终 instance 仍应结合项目自身验证流程进行人工确认。
+
+### 2.12 Oracle 生成
+
+`oracle_generator.py` 负责从原始仓库的抽象定义文件自动提取 oracle，并为 `feature_implement` instance 生成可执行断言。
+
+```bash
+python3 tools/build_feature_oracle.py \
+  instances/feature_implement/<instance-id> \
+  test_project/legado-Harmony
+```
+
+默认输出到 `instances/feature_implement/<instance-id>/oracle/`，其中包含：
+
+- `test_plan.json`：从原始源码抽取出的 oracle 计划，记录接口字段、枚举成员、类型别名和值映射；
+- `Oracle.test.ets`：根据 `test_plan.json` 生成的 Hypium 测试文件。
+
+当前 oracle 生成策略是“原始仓库取值 + 自动生成断言”：
+
+- 默认优先使用 `target.abstract_node.path` 作为 oracle 来源；若该文件不可用，再尝试 `mask.path`；
+- 接口字段会被解析成一个带类型标注的样例对象；
+- 枚举会生成稳定值断言；
+- `Record` 常量会生成键值映射断言；
+- 纯类型别名会在样例值可推导时生成编译期和运行期断言；
+- 无法自动推导样例值的导出会直接报错，避免生成弱 oracle。
