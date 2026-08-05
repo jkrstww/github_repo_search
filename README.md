@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 1. GitHub Repo Filter | 已实现 | 搜索并筛选适合构造 benchmark 的 HarmonyOS 仓库 |
 | 2.1 ArkTS AST 错误实例构造 | 已实现 | 基于 AST 自动注入错误并生成修复任务 instance |
-| 2.2 新特性开发实例构造 | 已实现 | 基于抽象接口/基类及多个实现文件构造新功能开发任务 |
+| 2.2 接口/基类实现补全实例构造 | 已实现 | mask 已有实现文件，并以恢复原实现的 patch 作为 gold label |
 | 2.3 应用迁移实例构造 | 进行中 | 已实现基于 ArkTS AST 的 `android.*` 调用初筛 |
 | 2.4 仓库 Issue 解决实例构造 | 规划中 | 基于真实 Issue 构造问题修复任务 |
 
@@ -292,9 +292,9 @@ wsl bash -lc "python3 tools/parse_arkts_syntax_tree.py test_project/Wechat_Harmo
 
 完整的分析规则、注入流程、命令参数、instance 格式、验证方式和已知边界见 [ArkTS AST 错误实例构造文档](src/arkts_syntax_tree/README.md)。
 
-### 2.2 新特性开发实例构造
+### 2.2 接口/基类实现补全实例构造
 
-面向真实 HarmonyOS 仓库构造尚未实现的新功能任务。生成器会发现 `interface` 或拥有派生实现的基类，并要求至少存在两个实现/使用文件；其中支持显式的 `implements`/`extends`，接口还支持 ArkTS 常见的结构化使用。输出包括基线仓库快照、功能需求、受影响模块和静态结构验收条件。
+生成器会发现 `interface` 或拥有派生实现的基类，并要求至少存在两个实现/使用文件；其中支持显式的 `implements`/`extends`，接口还支持 ArkTS 常见的结构化使用。生成时选择其中一个实现文件进行整文件 mask，要求智能体参考抽象定义和其他实现文件，在原路径补全被遮蔽的实现。
 
 列出 `test_project` 中的候选抽象节点：
 
@@ -303,7 +303,7 @@ PYTHONPATH=src python tools/build_feature_instance.py `
   test_project/Wechat_HarmonyOS --list
 ```
 
-构造新特性开发 instance：
+构造实现补全 instance：
 
 ```powershell
 PYTHONPATH=src python tools/build_feature_instance.py `
@@ -313,11 +313,15 @@ PYTHONPATH=src python tools/build_feature_instance.py `
 验证开发后的 instance：
 
 ```powershell
+cd <独立仓库副本>
+patch -p1 -i ../instances/feature_implement/<instance-id>/mask.patch
+
 PYTHONPATH=src python tools/verify_feature_instance.py \
-  instances/feature_implement/wechat_harmonyos-chatcontentitemdata-new-implementation
+  instances/feature_implement/<instance-id> \
+  <独立仓库副本>
 ```
 
-生成的目录包含 `repo/`、`instance.json` 和面向开发者的 `task.md`。默认保存在 `instances/feature_implement/`，基线快照不会修改原始仓库。错误修复实例则统一保存在 `instances/error_fix/`。
+生成的目录包含 `mask.patch`、`gold.patch`、`syntax_tree.jsonl` 和 `instance.json`，不保存仓库副本。默认 instance ID 为 `<仓库名>-<随机 UUID>`，默认保存在 `instances/feature_implement/`。评测时在独立仓库副本上应用 `mask.patch`，智能体完成实现；`gold.patch` 是从 mask 内容恢复原实现的 gold label。原始仓库不会被修改，错误修复实例则统一保存在 `instances/error_fix/`。
 
 ### 2.3 应用迁移实例构造（进行中）
 
