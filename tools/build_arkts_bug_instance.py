@@ -35,8 +35,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "instances",
-        help="instance parent directory; default: ./instances",
+        default=PROJECT_ROOT / "instances" / "error_fix",
+        help="instance parent directory; default: ./instances/error_fix",
     )
     parser.add_argument(
         "--min-out-degree",
@@ -91,8 +91,9 @@ def main(argv: list[str] | None = None) -> int:
         f"instance={instance['instance_id']} target={function['qualified_name']} "
         f"out_degree={target['out_degree']} consumers={target['downstream_function_count']}"
     )
-    print(f"snapshot={instance['snapshot']['repo']}")
-    print(f"fix_patch={instance['snapshot']['fix_patch']}")
+    instance_dir = args.output_dir / instance["instance_id"]
+    print(f"syntax_tree={instance_dir / 'syntax_tree.jsonl'}")
+    print(f"fix_patch={instance_dir / 'fix.patch'}")
     return 0
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,11 @@ class BugInstanceTest(unittest.TestCase):
         git_dir = self.repo / ".git"
         git_dir.mkdir()
         (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (git_dir / "config").write_text(
+            '[remote "origin"]\n'
+            "\turl = git@github.com:example/sample_repo.git\n",
+            encoding="utf-8",
+        )
 
         self.syntax_tree = self.root / "sample_syntax_tree.jsonl"
         write_syntax_tree_outputs(
@@ -112,7 +118,7 @@ class BugInstanceTest(unittest.TestCase):
         self.assertEqual(candidate.mutation.mutated_expression, "false")
         self.assertEqual(candidate.mutation.mutated_line, "    return false;\r\n")
 
-    def test_creates_mutated_snapshot_and_forward_repair_patch(self) -> None:
+    def test_creates_patches_metadata_and_colocated_syntax_tree(self) -> None:
         output_dir = self.root / "instances"
         instance = create_bug_instance(
             self.repo,
@@ -122,23 +128,32 @@ class BugInstanceTest(unittest.TestCase):
         )
 
         instance_dir = output_dir / "sample-instance"
-        snapshot_repo = instance_dir / "repo"
         original_source = (self.repo / "src/Producer.ets").read_text(encoding="utf-8")
-        mutated_source = (snapshot_repo / "src/Producer.ets").read_text(encoding="utf-8")
-        mutated_bytes = (snapshot_repo / "src/Producer.ets").read_bytes()
+        bug_patch = (instance_dir / "bug.patch").read_text(encoding="utf-8")
         fix_patch = (instance_dir / "fix.patch").read_text(encoding="utf-8")
+        copied_syntax_tree = instance_dir / "syntax_tree.jsonl"
+        persisted = json.loads((instance_dir / "instance.json").read_text(encoding="utf-8"))
 
         self.assertIn("return ok;", original_source)
         self.assertNotIn("return false;", original_source)
-        self.assertIn("return false;", mutated_source)
-        self.assertNotIn("return ok;", mutated_source)
-        self.assertIn(b"return false;\r\n", mutated_bytes)
-        self.assertEqual(mutated_bytes.count(b"\n"), mutated_bytes.count(b"\r\n"))
-        self.assertFalse((snapshot_repo / ".git").exists())
+        self.assertFalse((instance_dir / "repo").exists())
+        self.assertTrue(copied_syntax_tree.is_file())
+        self.assertEqual(copied_syntax_tree.read_bytes(), self.syntax_tree.read_bytes())
+        self.assertIn("-    return ok;", bug_patch)
+        self.assertIn("+    return false;", bug_patch)
         self.assertIn("-    return false;", fix_patch)
         self.assertIn("+    return ok;", fix_patch)
-        self.assertIn("ConsumerOne.run", instance["description"])
-        self.assertIn("ConsumerTwo.run", instance["description"])
+        self.assertEqual(
+            instance["description"],
+            "以下函数ConsumerOne.run、ConsumerTwo.run调用失败，找出错误",
+        )
+        self.assertNotIn("path", persisted["source_repo"])
+        self.assertEqual(
+            persisted["source_repo"]["github_url"],
+            "https://github.com/example/sample_repo",
+        )
+        self.assertNotIn("syntax_tree", persisted)
+        self.assertNotIn("snapshot", persisted)
         self.assertEqual(instance["target"]["downstream_function_count"], 2)
 
 

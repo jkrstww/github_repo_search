@@ -7,6 +7,7 @@ import posixpath
 import re
 import shutil
 import subprocess
+import configparser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,16 +18,6 @@ from .parser import CONTROL_WORDS, mask_non_code
 
 FUNCTION_NODE_TYPES = {"function", "method", "callback"}
 CONTAINER_NODE_TYPES = {"class", "struct", "interface"}
-SNAPSHOT_SKIP_DIRECTORIES = {
-    ".git",
-    ".hvigor",
-    ".idea",
-    ".preview",
-    ".vscode",
-    "build",
-    "node_modules",
-    "oh_modules",
-}
 
 
 @dataclass(frozen=True)
@@ -239,21 +230,18 @@ def create_bug_instance(
     candidate = candidates[0]
     instance_name = instance_id or _default_instance_id(repo.name, candidate.function)
     instance_dir = output / instance_name
-    snapshot_repo = instance_dir / "repo"
     if instance_dir.exists():
         raise FileExistsError(f"instance already exists: {instance_dir}")
 
     instance_dir.mkdir(parents=True)
-    shutil.copytree(repo, snapshot_repo, ignore=_snapshot_ignore)
+    shutil.copyfile(syntax_tree, instance_dir / "syntax_tree.jsonl")
 
     relative_target = Path(candidate.function.path)
     original_file = repo / relative_target
-    snapshot_file = snapshot_repo / relative_target
     original_lines = _read_text_preserve_newlines(original_file).splitlines(keepends=True)
     mutated_lines = list(original_lines)
     mutation_index = candidate.mutation.line - 1
     mutated_lines[mutation_index] = candidate.mutation.mutated_line
-    _write_text_preserve_newlines(snapshot_file, "".join(mutated_lines))
 
     bug_patch = _make_patch(
         original_lines,
@@ -275,14 +263,8 @@ def create_bug_instance(
         "instance_id": instance_name,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source_repo": {
-            "path": str(repo),
+            "github_url": _github_url(repo),
             "commit": _git_head(repo),
-        },
-        "syntax_tree": str(syntax_tree),
-        "snapshot": {
-            "repo": str(snapshot_repo),
-            "bug_patch": str(bug_patch_path),
-            "fix_patch": str(fix_patch_path),
         },
         "target": candidate.to_dict(),
         "description": render_description(candidate),
@@ -458,17 +440,8 @@ def find_return_consumers(
 
 
 def render_description(candidate: CandidateAnalysis) -> str:
-    consumers = "; ".join(
-        f"{consumer.function_name} ({consumer.path}:{consumer.call_line})"
-        for consumer in candidate.consumers
-    )
-    return (
-        f"在 {candidate.function.path}:{candidate.mutation.line} 向 "
-        f"{candidate.function.qualified_name} 注入返回值错误："
-        f"`{candidate.mutation.original_expression}` 被替换为 "
-        f"`{candidate.mutation.mutated_expression}`。该函数原始调用出度为 "
-        f"{candidate.out_degree}，返回值被多个跨文件下游函数消费：{consumers}。"
-    )
+    functions = "、".join(consumer.function_name for consumer in candidate.consumers)
+    return f"以下函数{functions}调用失败，找出错误"
 
 
 def _build_import_index(
@@ -690,11 +663,6 @@ def _read_text_preserve_newlines(path: Path) -> str:
         return fp.read()
 
 
-def _write_text_preserve_newlines(path: Path, value: str) -> None:
-    with path.open("w", encoding="utf-8", newline="") as fp:
-        fp.write(value)
-
-
 def _split_line_ending(line: str) -> tuple[str, str]:
     if line.endswith("\r\n"):
         return line[:-2], "\r\n"
@@ -710,13 +678,9 @@ def _make_patch(before: list[str], after: list[str], relative_path: str) -> str:
             after,
             fromfile=f"a/{relative_path}",
             tofile=f"b/{relative_path}",
+            n=0,
         )
     )
-
-
-def _snapshot_ignore(directory: str, names: list[str]) -> set[str]:
-    del directory
-    return {name for name in names if name in SNAPSHOT_SKIP_DIRECTORIES}
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -746,6 +710,38 @@ def _git_head(repo: Path) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def _github_url(repo: Path) -> str | None:
+    remote = ""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "config", "--get", "remote.origin.url"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        result = None
+    if result is not None and result.returncode == 0:
+        remote = result.stdout.strip()
+
+    if not remote:
+        config_path = repo / ".git" / "config"
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(config_path, encoding="utf-8")
+            remote = parser.get('remote "origin"', "url", fallback="").strip()
+        except (OSError, configparser.Error):
+            return None
+
+    match = re.match(
+        r"^(?:https?://github\.com/|ssh://git@github\.com/|git@github\.com:)(?P<repo>[^/\s]+/[^/\s]+?)(?:\.git)?/?$",
+        remote,
+    )
+    if not match:
+        return None
+    return f"https://github.com/{match.group('repo')}"
 
 
 def _sha256_text(value: str) -> str:
