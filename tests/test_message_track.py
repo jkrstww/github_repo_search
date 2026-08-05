@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from message_track import MessageTrack, load_message_track
+from evaluation import evaluate_track
+from message_track import MessageTrack, build_tool_action, load_message_track
 
 
 class FakeSdkResponse:
@@ -102,11 +103,76 @@ class MessageTrackTest(unittest.TestCase):
             self.assertEqual(response["id"], "resp_sdk")
             self.assertEqual(response["serialization_mode"], "json")
 
+    def test_records_provider_neutral_turn_for_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            instance_dir = (
+                Path(temporary_directory)
+                / "instances"
+                / "feature_implement"
+                / "instance-1"
+            )
+            instance_dir.mkdir(parents=True)
+            expected_file = "entry/src/main/ets/common/LazyIDataSource/BasicDataSource.ets"
+            target_file = "entry/src/main/ets/common/LazyIDataSource/ChaptersDataSource.ets"
+            reference_file = "entry/src/main/ets/common/LazyIDataSource/FileListDataSource.ets"
+            (instance_dir / "instance.json").write_text(
+                json.dumps(
+                    {
+                        "task_type": "feature_implementation",
+                        "instance_id": "instance-1",
+                        "target": {"abstract_node": {"path": expected_file}},
+                        "mask": {"path": target_file},
+                        "reference_implementation_files": [reference_file],
+                        "affected_modules": [
+                            expected_file,
+                            target_file,
+                            reference_file,
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = Path(temporary_directory) / "trajectory.json"
+            track = MessageTrack(instance_dir, output_path=output)
+
+            track.record_turn(
+                message=f"先查看 {expected_file}，再恢复 {target_file}",
+                actions=[
+                    build_tool_action(
+                        action_type="command_execution",
+                        action_id="cmd_1",
+                        command=f"sed -n '1,80p' {expected_file}",
+                        status="completed",
+                        exit_code=0,
+                        output="source content",
+                    )
+                ],
+                file_paths=[reference_file],
+                metadata={"turn": 1},
+            )
+
+            document = load_message_track(output)
+            self.assertEqual(document["responses"][0]["response_id"], "turn_1")
+            self.assertEqual(
+                document["responses"][0]["response"]["output"][1]["type"],
+                "command_execution",
+            )
+
+            metrics = evaluate_track(document)["metrics"]
+            self.assertEqual(
+                metrics["action_validity"]["tool_execution_success_rate"], 1.0
+            )
+            self.assertEqual(metrics["cross_file_retrieval"]["file_recall"], 1.0)
+
     def test_resumes_and_preserves_response_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             output = Path(temporary_directory) / "trajectory.json"
             instance = Path(temporary_directory) / "instance"
-            first = MessageTrack(output_path=output, instance_dir=instance, instance_id="instance-1")
+            first = MessageTrack(
+                output_path=output,
+                instance_dir=instance,
+                instance_id="instance-1",
+            )
             first.record_response({"id": "resp_1", "output_text": "first"})
 
             resumed = MessageTrack(

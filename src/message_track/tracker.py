@@ -8,10 +8,19 @@ import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 
 SCHEMA_VERSION = 2
+ACTION_TYPES = {
+    "function_call",
+    "function_call_output",
+    "tool_call",
+    "tool_result",
+    "tool_output",
+    "command_execution",
+    "command_result",
+}
 
 
 def _utc_now() -> str:
@@ -44,6 +53,84 @@ def _json_value(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return _json_value(vars(value))
     return str(value)
+
+
+def build_tool_action(
+    *,
+    action_type: str,
+    action_id: str | None = None,
+    tool_name: str | None = None,
+    arguments: Any = None,
+    command: str | None = None,
+    input_value: Any = None,
+    success: bool | None = None,
+    is_error: bool | None = None,
+    exit_code: int | None = None,
+    status: str | None = None,
+    error: Any = None,
+    output: Any = None,
+    result: Any = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build an evaluation-compatible tool/action item for a tracked turn."""
+    normalised_type = action_type.strip().lower()
+    if normalised_type not in ACTION_TYPES:
+        raise ValueError(f"unsupported action type: {action_type}")
+
+    action: dict[str, Any] = {"type": normalised_type}
+    if action_id is not None:
+        action["id"] = str(action_id)
+    if tool_name is not None:
+        action["name"] = str(tool_name)
+    if arguments is not None:
+        action["arguments"] = _json_value(arguments)
+    if command is not None:
+        action["command"] = command
+    if input_value is not None:
+        action["input"] = _json_value(input_value)
+    if success is not None:
+        action["success"] = bool(success)
+    if is_error is not None:
+        action["is_error"] = bool(is_error)
+    if exit_code is not None:
+        action["exit_code"] = int(exit_code)
+    if status is not None:
+        action["status"] = status
+    if error not in (None, ""):
+        action["error"] = _json_value(error)
+    if output is not None:
+        action["output"] = _json_value(output)
+    if result is not None:
+        action["result"] = _json_value(result)
+    if metadata:
+        action["metadata"] = _json_value(dict(metadata))
+    return action
+
+
+def _normalise_actions(
+    actions: Iterable[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for action in actions or []:
+        if not isinstance(action, Mapping):
+            raise ValueError("each action must be a mapping")
+        payload = _json_value(action)
+        if not isinstance(payload, dict):
+            raise ValueError("each action must serialize to an object")
+        action_type = str(payload.get("type", "")).strip().lower()
+        if action_type not in ACTION_TYPES:
+            raise ValueError(f"unsupported action type: {payload.get('type')}")
+        payload["type"] = action_type
+        result.append(payload)
+    return result
+
+
+def _message_item(text: str, role: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "role": role,
+        "content": [{"type": "output_text", "text": text}],
+    }
 
 
 @dataclass(frozen=True)
@@ -218,6 +305,55 @@ class MessageTrack:
             self._document["updated_at"] = timestamp
             self._persist()
             return record
+
+    def record_turn(
+        self,
+        *,
+        message: str | None = None,
+        actions: Iterable[Mapping[str, Any]] | None = None,
+        file_paths: Iterable[str] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        response_id: str | None = None,
+        status: str = "completed",
+        role: str = "assistant",
+        usage: Mapping[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> ResponseRecord:
+        """Append one provider-neutral agent turn.
+
+        This is useful when the caller has a real trajectory transcript but no
+        SDK response object. Tool actions are stored in the same response so the
+        evaluator can recover action validity and file-retrieval evidence.
+        """
+        normalised_actions = _normalise_actions(actions)
+        normalised_file_paths = [
+            str(path).replace("\\", "/") for path in file_paths or [] if str(path)
+        ]
+        if message is None and not normalised_actions and not normalised_file_paths:
+            raise ValueError("turn must include a message, action, or file path")
+
+        payload = _json_value(dict(extra or {}))
+        if not isinstance(payload, dict):
+            payload = {}
+
+        output_items = (
+            list(payload.get("output", []))
+            if isinstance(payload.get("output"), list)
+            else []
+        )
+        if message is not None:
+            output_items.append(_message_item(message, role))
+        output_items.extend(normalised_actions)
+
+        payload["id"] = response_id or f"turn_{self.response_count + 1}"
+        payload["status"] = status
+        if output_items:
+            payload["output"] = output_items
+        if normalised_file_paths:
+            payload["file_paths"] = normalised_file_paths
+        if usage is not None:
+            payload["usage"] = _json_value(dict(usage))
+        return self.record_response(payload, metadata=metadata)
 
     def close(self, *, status: str = "completed", summary: str | None = None) -> None:
         if status not in {"completed", "failed", "cancelled"}:
