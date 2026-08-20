@@ -7,7 +7,6 @@ import posixpath
 import re
 import shutil
 import subprocess
-import configparser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +17,74 @@ from .parser import CONTROL_WORDS, mask_non_code
 
 FUNCTION_NODE_TYPES = {"function", "method", "callback"}
 CONTAINER_NODE_TYPES = {"class", "struct", "interface"}
+DEFAULT_MUTATION_OPERATORS = (
+    "conditional_negation",
+    "comparison_replacement",
+    "logical_replacement",
+    "numeric_boundary",
+    "assignment_replacement",
+    "call_deletion",
+)
+MUTATION_CATEGORIES = {
+    "conditional_negation": "condition",
+    "comparison_replacement": "comparison",
+    "logical_replacement": "logic",
+    "numeric_boundary": "boundary",
+    "assignment_replacement": "assignment",
+    "call_deletion": "side_effect",
+    "return_replacement": "return",
+}
+OPERATOR_CONFIDENCE = {
+    "conditional_negation": "high",
+    "comparison_replacement": "high",
+    "logical_replacement": "high",
+    "numeric_boundary": "medium",
+    "assignment_replacement": "high",
+    "call_deletion": "medium",
+    "return_replacement": "medium",
+}
+SIDE_EFFECT_CALL_NAMES = {
+    "add",
+    "cancel",
+    "clear",
+    "close",
+    "delete",
+    "emit",
+    "fetch",
+    "hide",
+    "insert",
+    "load",
+    "notify",
+    "open",
+    "persist",
+    "refresh",
+    "register",
+    "release",
+    "remove",
+    "request",
+    "reset",
+    "save",
+    "send",
+    "set",
+    "show",
+    "start",
+    "stop",
+    "store",
+    "unregister",
+    "update",
+    "write",
+}
+LOW_VALUE_CALL_OWNERS = {"console", "hilog", "logger", "log"}
+SNAPSHOT_SKIP_DIRECTORIES = {
+    ".git",
+    ".hvigor",
+    ".idea",
+    ".preview",
+    ".vscode",
+    "build",
+    "node_modules",
+    "oh_modules",
+}
 
 
 @dataclass(frozen=True)
@@ -57,21 +124,53 @@ class FunctionInfo:
 
 
 @dataclass(frozen=True)
-class ReturnMutation:
+class MutationSpec:
+    operator_id: str
+    category: str
     line: int
+    start_column: int
+    end_column: int
     original_line: str
     mutated_line: str
-    original_expression: str
-    mutated_expression: str
+    original_text: str
+    mutated_text: str
+    confidence: str
+    rationale: str
+
+    @property
+    def original_expression(self) -> str:
+        """Backward-compatible name used by schema-v1 callers."""
+        return self.original_text
+
+    @property
+    def mutated_expression(self) -> str:
+        """Backward-compatible name used by schema-v1 callers."""
+        return self.mutated_text
+
+    @property
+    def identity(self) -> str:
+        return f"{self.operator_id}:{self.line}:{self.start_column}:{self.original_text}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "operator_id": self.operator_id,
+            "category": self.category,
             "line": self.line,
+            "start_column": self.start_column,
+            "end_column": self.end_column,
             "original_line": self.original_line.rstrip("\r\n"),
             "mutated_line": self.mutated_line.rstrip("\r\n"),
-            "original_expression": self.original_expression,
-            "mutated_expression": self.mutated_expression,
+            "original_text": self.original_text,
+            "mutated_text": self.mutated_text,
+            "original_expression": self.original_text,
+            "mutated_expression": self.mutated_text,
+            "confidence": self.confidence,
+            "rationale": self.rationale,
         }
+
+
+# Kept as a source-compatible import for code that used the old internal name.
+ReturnMutation = MutationSpec
 
 
 @dataclass(frozen=True)
@@ -104,11 +203,24 @@ class CandidateAnalysis:
     out_degree: int
     callees: tuple[str, ...]
     consumers: tuple[ConsumerInfo, ...]
-    mutation: ReturnMutation
+    mutations: tuple[MutationSpec, ...]
 
     @property
     def downstream_function_count(self) -> int:
         return len({consumer.identity for consumer in self.consumers})
+
+    @property
+    def mutation(self) -> MutationSpec:
+        """Return the highest-ranked mutation for schema-v1 compatibility."""
+        return self.mutations[0]
+
+    @property
+    def consumed_return_count(self) -> int:
+        return sum(consumer.consumption_type != "bare_call" for consumer in self.consumers)
+
+    @property
+    def impact_score(self) -> int:
+        return self.downstream_function_count * 10 + self.consumed_return_count * 3 + self.out_degree
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,7 +229,10 @@ class CandidateAnalysis:
             "callees": list(self.callees),
             "downstream_function_count": self.downstream_function_count,
             "downstream_consumers": [consumer.to_dict() for consumer in self.consumers],
+            "mutation_count": len(self.mutations),
+            "mutations": [mutation.to_dict() for mutation in self.mutations],
             "mutation": self.mutation.to_dict(),
+            "impact_score": self.impact_score,
         }
 
 
@@ -145,6 +260,7 @@ def find_bug_candidates(
     *,
     min_out_degree: int = 3,
     min_downstream_consumers: int = 2,
+    mutation_operators: tuple[str, ...] | list[str] | None = None,
 ) -> list[CandidateAnalysis]:
     repo = Path(repo_root)
     records = load_syntax_tree_jsonl(syntax_tree_path)
@@ -153,6 +269,7 @@ def find_bug_candidates(
     functions_by_path = _group_functions_by_path(functions)
     imports_by_path = _build_import_index(records, known_paths)
 
+    enabled_operators = _validate_mutation_operators(mutation_operators)
     candidates: list[CandidateAnalysis] = []
     for function in functions:
         if function.is_anonymous:
@@ -161,15 +278,15 @@ def find_bug_candidates(
             continue
 
         source = _read_repo_file(repo, function.path)
-        mutation = find_return_mutation(function, source)
-        if mutation is None:
+        mutations = enumerate_mutations(function, source, operators=enabled_operators)
+        if not mutations:
             continue
 
         callees = extract_callees(source, function)
         if len(callees) < min_out_degree:
             continue
 
-        consumers = find_return_consumers(
+        consumers = find_function_callers(
             repo,
             function,
             records,
@@ -186,15 +303,17 @@ def find_bug_candidates(
                 out_degree=len(callees),
                 callees=tuple(sorted(callees)),
                 consumers=tuple(unique_consumers),
-                mutation=mutation,
+                mutations=tuple(mutations),
             )
         )
 
     return sorted(
         candidates,
         key=lambda candidate: (
+            -candidate.impact_score,
             -candidate.downstream_function_count,
             -candidate.out_degree,
+            -len(candidate.mutations),
             candidate.function.path,
             candidate.function.start_line,
         ),
@@ -209,6 +328,8 @@ def create_bug_instance(
     min_out_degree: int = 3,
     min_downstream_consumers: int = 2,
     instance_id: str | None = None,
+    mutation_operator: str | None = None,
+    selection_seed: int | None = None,
 ) -> dict[str, Any]:
     repo = Path(repo_root).resolve()
     syntax_tree = Path(syntax_tree_path).resolve()
@@ -220,6 +341,7 @@ def create_bug_instance(
         syntax_tree,
         min_out_degree=min_out_degree,
         min_downstream_consumers=min_downstream_consumers,
+        mutation_operators=[mutation_operator] if mutation_operator else None,
     )
     if not candidates:
         raise ValueError(
@@ -227,21 +349,30 @@ def create_bug_instance(
             f"{min_out_degree} and downstream consumers >= {min_downstream_consumers}"
         )
 
-    candidate = candidates[0]
-    instance_name = instance_id or _default_instance_id(repo.name, candidate.function)
+    commit = _git_head(repo)
+    effective_seed = selection_seed
+    if effective_seed is None:
+        seed_material = f"{repo.name}:{commit or ''}"
+        effective_seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
+    effective_seed = max(effective_seed, 0)
+    candidate, mutation = select_candidate_mutation(candidates, seed=effective_seed)
+    instance_name = instance_id or _default_instance_id(repo.name, candidate.function, mutation)
     instance_dir = output / instance_name
+    snapshot_repo = instance_dir / "repo"
     if instance_dir.exists():
         raise FileExistsError(f"instance already exists: {instance_dir}")
 
     instance_dir.mkdir(parents=True)
-    shutil.copyfile(syntax_tree, instance_dir / "syntax_tree.jsonl")
+    shutil.copytree(repo, snapshot_repo, ignore=_snapshot_ignore)
 
     relative_target = Path(candidate.function.path)
     original_file = repo / relative_target
+    snapshot_file = snapshot_repo / relative_target
     original_lines = _read_text_preserve_newlines(original_file).splitlines(keepends=True)
     mutated_lines = list(original_lines)
-    mutation_index = candidate.mutation.line - 1
-    mutated_lines[mutation_index] = candidate.mutation.mutated_line
+    mutation_index = mutation.line - 1
+    mutated_lines[mutation_index] = mutation.mutated_line
+    _write_text_preserve_newlines(snapshot_file, "".join(mutated_lines))
 
     bug_patch = _make_patch(
         original_lines,
@@ -259,15 +390,28 @@ def create_bug_instance(
     fix_patch_path.write_text(fix_patch, encoding="utf-8")
 
     metadata = {
-        "schema_version": 1,
+        "schema_version": 2,
         "instance_id": instance_name,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source_repo": {
-            "github_url": _github_url(repo),
-            "commit": _git_head(repo),
+            "path": str(repo),
+            "commit": commit,
         },
-        "target": candidate.to_dict(),
-        "description": render_description(candidate),
+        "syntax_tree": str(syntax_tree),
+        "snapshot": {
+            "repo": str(snapshot_repo),
+            "bug_patch": str(bug_patch_path),
+            "fix_patch": str(fix_patch_path),
+        },
+        "target": {**candidate.to_dict(), "mutation": mutation.to_dict()},
+        "selection": {
+            "strategy": "operator_stratified_top_impact",
+            "seed": effective_seed,
+            "operator": mutation.operator_id,
+            "eligible_function_count": len(candidates),
+            "eligible_mutation_count": sum(len(item.mutations) for item in candidates),
+        },
+        "description": render_description(candidate, mutation),
         "file_hashes": {
             "original_sha256": _sha256_text("".join(original_lines)),
             "mutated_sha256": _sha256_text("".join(mutated_lines)),
@@ -344,7 +488,57 @@ def extract_callees(source: str, function: FunctionInfo) -> set[str]:
     return callees
 
 
-def find_return_mutation(function: FunctionInfo, source: str) -> ReturnMutation | None:
+def enumerate_mutations(
+    function: FunctionInfo,
+    source: str,
+    *,
+    operators: tuple[str, ...] | list[str] | None = None,
+) -> list[MutationSpec]:
+    """Enumerate deterministic, single-line, type-preserving mutations in a function."""
+    enabled = _validate_mutation_operators(operators)
+    original_lines = source.splitlines(keepends=True)
+    masked_lines = mask_non_code(source).splitlines(keepends=True)
+    found: list[MutationSpec] = []
+    builders = {
+        "conditional_negation": _conditional_mutations,
+        "comparison_replacement": _comparison_mutations,
+        "logical_replacement": _logical_mutations,
+        "numeric_boundary": _numeric_mutations,
+        "assignment_replacement": _assignment_mutations,
+        "call_deletion": _call_deletion_mutations,
+    }
+    for line_number in range(function.start_line, function.end_line + 1):
+        if line_number > len(original_lines) or line_number > len(masked_lines):
+            continue
+        original_line = original_lines[line_number - 1]
+        masked_line, _ = _split_line_ending(masked_lines[line_number - 1])
+        if line_number == function.start_line and "{" in masked_line:
+            body_start = masked_line.find("{") + 1
+            masked_line = " " * body_start + masked_line[body_start:]
+        for operator_id in enabled:
+            for mutation in builders[operator_id](line_number, original_line, masked_line):
+                found.append(mutation)
+
+    unique: dict[tuple[str, int, str], MutationSpec] = {}
+    for mutation in found:
+        unique.setdefault(
+            (mutation.operator_id, mutation.line, mutation.mutated_line),
+            mutation,
+        )
+    operator_order = {operator: index for index, operator in enumerate(enabled)}
+    return sorted(
+        unique.values(),
+        key=lambda item: (
+            operator_order[item.operator_id],
+            item.line,
+            item.start_column,
+            item.mutated_text,
+        ),
+    )
+
+
+def find_return_mutation(function: FunctionInfo, source: str) -> MutationSpec | None:
+    """Legacy return-value mutation retained for existing callers and old instances."""
     original_lines = source.splitlines(keepends=True)
     masked_lines = mask_non_code(source).splitlines()
     for line_number in range(function.end_line, function.start_line - 1, -1):
@@ -367,14 +561,265 @@ def find_return_mutation(function: FunctionInfo, source: str) -> ReturnMutation 
 
         semi = match.group("semi") or ""
         mutated_line = f"{match.group('indent')}return {mutated_expression}{semi}{line_ending}"
-        return ReturnMutation(
+        return MutationSpec(
+            operator_id="return_replacement",
+            category=MUTATION_CATEGORIES["return_replacement"],
             line=line_number,
+            start_column=match.start("expr"),
+            end_column=match.end("expr"),
             original_line=original_line,
             mutated_line=mutated_line,
-            original_expression=expression,
-            mutated_expression=mutated_expression,
+            original_text=expression,
+            mutated_text=mutated_expression,
+            confidence=OPERATOR_CONFIDENCE["return_replacement"],
+            rationale="replace the returned value with a type-compatible incorrect value",
         )
     return None
+
+
+def _conditional_mutations(
+    line_number: int,
+    original_line: str,
+    masked_line: str,
+) -> list[MutationSpec]:
+    results: list[MutationSpec] = []
+    for start, end in _condition_spans(masked_line):
+        original = original_line[start:end]
+        stripped = original.strip()
+        if not stripped:
+            continue
+        replacement = f"!({stripped})"
+        results.append(
+            _replacement_mutation(
+                "conditional_negation",
+                line_number,
+                original_line,
+                start,
+                end,
+                replacement,
+                "negate a branch or loop guard while preserving its boolean type",
+            )
+        )
+    return results
+
+
+def _comparison_mutations(
+    line_number: int,
+    original_line: str,
+    masked_line: str,
+) -> list[MutationSpec]:
+    replacements = {
+        "===": "!==",
+        "!==": "===",
+        "==": "!=",
+        "!=": "==",
+        ">=": ">",
+        "<=": "<",
+        ">": ">=",
+        "<": "<=",
+    }
+    results: list[MutationSpec] = []
+    for match in re.finditer(r"===|!==|==|!=|>=|<=|(?<![=-])>(?!=)|(?<![=<])<(?!=)", masked_line):
+        operator = match.group(0)
+        before = masked_line[: match.start()].rstrip()
+        after = masked_line[match.end() :].lstrip()
+        if not before or not after or after[0] in "{;=>":
+            continue
+        if operator in {"<", ">"}:
+            left_space = match.start() > 0 and masked_line[match.start() - 1].isspace()
+            right_space = match.end() < len(masked_line) and masked_line[match.end()].isspace()
+            if not (left_space or right_space):
+                continue
+        results.append(
+            _replacement_mutation(
+                "comparison_replacement",
+                line_number,
+                original_line,
+                match.start(),
+                match.end(),
+                replacements[operator],
+                "change equality or a boundary comparison without changing operand types",
+            )
+        )
+    return results
+
+
+def _logical_mutations(
+    line_number: int,
+    original_line: str,
+    masked_line: str,
+) -> list[MutationSpec]:
+    results: list[MutationSpec] = []
+    for match in re.finditer(r"&&|\|\|", masked_line):
+        replacement = "||" if match.group(0) == "&&" else "&&"
+        results.append(
+            _replacement_mutation(
+                "logical_replacement",
+                line_number,
+                original_line,
+                match.start(),
+                match.end(),
+                replacement,
+                "replace conjunction with disjunction, or vice versa",
+            )
+        )
+    return results
+
+
+def _numeric_mutations(
+    line_number: int,
+    original_line: str,
+    masked_line: str,
+) -> list[MutationSpec]:
+    results: list[MutationSpec] = []
+    for match in re.finditer(r"(?<![\w$.])(?P<number>-?\d+(?:\.\d+)?)(?![\w.])", masked_line):
+        original = match.group("number")
+        value = float(original) if "." in original else int(original)
+        mutated_value = 1 if value == 0 else value - 1 if value > 0 else value + 1
+        replacement = str(mutated_value)
+        results.append(
+            _replacement_mutation(
+                "numeric_boundary",
+                line_number,
+                original_line,
+                match.start("number"),
+                match.end("number"),
+                replacement,
+                "shift a numeric literal by one toward a neighboring boundary",
+            )
+        )
+    return results
+
+
+def _assignment_mutations(
+    line_number: int,
+    original_line: str,
+    masked_line: str,
+) -> list[MutationSpec]:
+    replacements = {"+=": "-=", "-=": "+=", "++": "--", "--": "++"}
+    results: list[MutationSpec] = []
+    for match in re.finditer(r"\+=|-=|\+\+|--", masked_line):
+        operator = match.group(0)
+        results.append(
+            _replacement_mutation(
+                "assignment_replacement",
+                line_number,
+                original_line,
+                match.start(),
+                match.end(),
+                replacements[operator],
+                "reverse an additive assignment or increment/decrement update",
+            )
+        )
+    return results
+
+
+def _call_deletion_mutations(
+    line_number: int,
+    original_line: str,
+    masked_line: str,
+) -> list[MutationSpec]:
+    match = re.match(
+        r"^(?P<indent>\s*)(?:await\s+)?(?P<callee>[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*)\s*\(.*\)\s*;?\s*$",
+        masked_line,
+    )
+    if not match:
+        return []
+    callee = match.group("callee").replace("?.", ".")
+    parts = callee.split(".")
+    call_name = parts[-1]
+    owner = parts[-2].lower() if len(parts) > 1 else ""
+    looks_side_effectful = _looks_side_effect_call_name(call_name)
+    if not looks_side_effectful or owner in LOW_VALUE_CALL_OWNERS:
+        return []
+    _, line_ending = _split_line_ending(original_line)
+    return [
+        MutationSpec(
+            operator_id="call_deletion",
+            category=MUTATION_CATEGORIES["call_deletion"],
+            line=line_number,
+            start_column=len(match.group("indent")),
+            end_column=len(masked_line.rstrip()),
+            original_line=original_line,
+            mutated_line=line_ending,
+            original_text=original_line.strip().rstrip(";"),
+            mutated_text="<deleted>",
+            confidence=OPERATOR_CONFIDENCE["call_deletion"],
+            rationale="remove a standalone call whose name indicates an observable side effect",
+        )
+    ]
+
+
+def _looks_side_effect_call_name(call_name: str) -> bool:
+    lower_name = call_name.lower()
+    if lower_name in SIDE_EFFECT_CALL_NAMES:
+        return True
+    for prefix in SIDE_EFFECT_CALL_NAMES:
+        if not lower_name.startswith(prefix) or len(call_name) == len(prefix):
+            continue
+        suffix = call_name[len(prefix) :]
+        if suffix.startswith("_") or suffix[0].isupper():
+            return True
+    return False
+
+
+def _replacement_mutation(
+    operator_id: str,
+    line_number: int,
+    original_line: str,
+    start: int,
+    end: int,
+    replacement: str,
+    rationale: str,
+) -> MutationSpec:
+    original_text = original_line[start:end]
+    return MutationSpec(
+        operator_id=operator_id,
+        category=MUTATION_CATEGORIES[operator_id],
+        line=line_number,
+        start_column=start,
+        end_column=end,
+        original_line=original_line,
+        mutated_line=original_line[:start] + replacement + original_line[end:],
+        original_text=original_text,
+        mutated_text=replacement,
+        confidence=OPERATOR_CONFIDENCE[operator_id],
+        rationale=rationale,
+    )
+
+
+def _condition_spans(masked_line: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"\b(?:if|while)\s*\(", masked_line):
+        open_index = masked_line.find("(", match.start())
+        depth = 0
+        for index in range(open_index, len(masked_line)):
+            if masked_line[index] == "(":
+                depth += 1
+            elif masked_line[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    start = open_index + 1
+                    while start < index and masked_line[start].isspace():
+                        start += 1
+                    end = index
+                    while end > start and masked_line[end - 1].isspace():
+                        end -= 1
+                    if start < end:
+                        spans.append((start, end))
+                    break
+    return spans
+
+
+def _validate_mutation_operators(
+    operators: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...]:
+    requested = tuple(operators or DEFAULT_MUTATION_OPERATORS)
+    unknown = sorted(set(requested) - set(DEFAULT_MUTATION_OPERATORS))
+    if unknown:
+        raise ValueError(f"unknown mutation operator(s): {', '.join(unknown)}")
+    # Preserve the public canonical order rather than caller/set ordering.
+    return tuple(operator for operator in DEFAULT_MUTATION_OPERATORS if operator in requested)
 
 
 def infer_mutated_expression(function: FunctionInfo, expression: str) -> str:
@@ -391,7 +836,7 @@ def infer_mutated_expression(function: FunctionInfo, expression: str) -> str:
     return "null"
 
 
-def find_return_consumers(
+def find_function_callers(
     repo: Path,
     candidate: FunctionInfo,
     records: list[dict[str, Any]],
@@ -439,9 +884,70 @@ def find_return_consumers(
     return consumers
 
 
-def render_description(candidate: CandidateAnalysis) -> str:
-    functions = "、".join(consumer.function_name for consumer in candidate.consumers)
-    return f"以下函数{functions}调用失败，找出错误"
+def find_return_consumers(
+    repo: Path,
+    candidate: FunctionInfo,
+    records: list[dict[str, Any]],
+    imports_by_path: dict[str, list[ImportBinding]],
+    functions_by_path: dict[str, list[FunctionInfo]],
+) -> list[ConsumerInfo]:
+    """Compatibility wrapper returning only calls that consume the result."""
+    return [
+        consumer
+        for consumer in find_function_callers(
+            repo,
+            candidate,
+            records,
+            imports_by_path,
+            functions_by_path,
+        )
+        if consumer.consumption_type != "bare_call"
+    ]
+
+
+def select_candidate_mutation(
+    candidates: list[CandidateAnalysis],
+    *,
+    seed: int = 0,
+) -> tuple[CandidateAnalysis, MutationSpec]:
+    """Select by operator stratum, then rotate across high-impact functions and sites."""
+    if not candidates:
+        raise ValueError("cannot select from an empty candidate list")
+    available_operators = [
+        operator
+        for operator in DEFAULT_MUTATION_OPERATORS
+        if any(any(mutation.operator_id == operator for mutation in item.mutations) for item in candidates)
+    ]
+    if not available_operators:
+        raise ValueError("candidate list contains no supported mutations")
+
+    normalized_seed = max(seed, 0)
+    operator = available_operators[normalized_seed % len(available_operators)]
+    rotation = normalized_seed // len(available_operators)
+    eligible = [
+        candidate
+        for candidate in candidates
+        if any(mutation.operator_id == operator for mutation in candidate.mutations)
+    ]
+    # Candidates already carry an impact-oriented order; rotate so corpus builders can
+    # cover more functions while seed=0 still chooses the strongest candidate.
+    candidate = eligible[rotation % len(eligible)]
+    mutations = [item for item in candidate.mutations if item.operator_id == operator]
+    mutation = mutations[(rotation // len(eligible)) % len(mutations)]
+    return candidate, mutation
+
+
+def render_description(candidate: CandidateAnalysis, mutation: MutationSpec | None = None) -> str:
+    mutation = mutation or candidate.mutation
+    consumers = "; ".join(
+        f"{consumer.function_name} ({consumer.path}:{consumer.call_line})"
+        for consumer in candidate.consumers
+    )
+    return (
+        f"多个跨文件调用路径出现行为异常。受影响的调用函数包括：{consumers}。"
+        f"请沿调用关系定位共享目标函数中的单点逻辑错误并修复，"
+        f"保持其公开签名和其他现有行为不变。该实例属于 {mutation.category} 类错误。"
+    )
 
 
 def _build_import_index(
@@ -583,6 +1089,8 @@ def _classify_consumption(
         return "argument"
     if ".then" in original_line[call_start:]:
         return "promise_chain"
+    if re.match(r"^\s*(?:await\s+)?$", prefix):
+        return "bare_call"
     return None
 
 
@@ -663,6 +1171,11 @@ def _read_text_preserve_newlines(path: Path) -> str:
         return fp.read()
 
 
+def _write_text_preserve_newlines(path: Path, value: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fp:
+        fp.write(value)
+
+
 def _split_line_ending(line: str) -> tuple[str, str]:
     if line.endswith("\r\n"):
         return line[:-2], "\r\n"
@@ -678,9 +1191,13 @@ def _make_patch(before: list[str], after: list[str], relative_path: str) -> str:
             after,
             fromfile=f"a/{relative_path}",
             tofile=f"b/{relative_path}",
-            n=0,
         )
     )
+
+
+def _snapshot_ignore(directory: str, names: list[str]) -> set[str]:
+    del directory
+    return {name for name in names if name in SNAPSHOT_SKIP_DIRECTORIES}
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -691,10 +1208,14 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     return True
 
 
-def _default_instance_id(repo_name: str, function: FunctionInfo) -> str:
+def _default_instance_id(
+    repo_name: str,
+    function: FunctionInfo,
+    mutation: MutationSpec,
+) -> str:
     target = re.sub(r"[^A-Za-z0-9_.-]+", "_", function.qualified_name).strip("_")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    return f"{repo_name}_{target}_{timestamp}"
+    return f"{repo_name}_{target}_{mutation.operator_id}_{timestamp}"
 
 
 def _git_head(repo: Path) -> str | None:
@@ -710,38 +1231,6 @@ def _git_head(repo: Path) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
-
-
-def _github_url(repo: Path) -> str | None:
-    remote = ""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "config", "--get", "remote.origin.url"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        result = None
-    if result is not None and result.returncode == 0:
-        remote = result.stdout.strip()
-
-    if not remote:
-        config_path = repo / ".git" / "config"
-        parser = configparser.ConfigParser()
-        try:
-            parser.read(config_path, encoding="utf-8")
-            remote = parser.get('remote "origin"', "url", fallback="").strip()
-        except (OSError, configparser.Error):
-            return None
-
-    match = re.match(
-        r"^(?:https?://github\.com/|ssh://git@github\.com/|git@github\.com:)(?P<repo>[^/\s]+/[^/\s]+?)(?:\.git)?/?$",
-        remote,
-    )
-    if not match:
-        return None
-    return f"https://github.com/{match.group('repo')}"
 
 
 def _sha256_text(value: str) -> str:

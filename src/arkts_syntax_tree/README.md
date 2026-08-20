@@ -4,17 +4,17 @@
 
 | 类型 | 目标 | 默认输出目录 | 基线形式 | 验收方式 |
 | --- | --- | --- | --- | --- |
-| ArkTS AST 错误实例构造 | 注入可定位、可恢复的返回值错误，形成修复任务 | `instances/error_fix/` | `bug.patch` 与 `fix.patch` | 补丁、构建和测试 |
+| ArkTS AST 错误实例构造 | 注入可定位、可恢复的单点逻辑错误，形成修复任务 | `instances/error_fix/` | `bug.patch` 与 `fix.patch` | 补丁、构建和测试 |
 | 接口/基类实现补全实例构造 | mask 一个已有实现文件，要求智能体在原路径补全 | `instances/feature_implement/` | `mask.patch` 与 `gold.patch` | 静态结构验收与 gold patch |
 
-两类任务共享 `parser.py` 提取的 ArkTS/ETS 结构信息，且都不保存仓库副本。错误实例通过 `bug.patch`/`fix.patch` 表达错误注入和修复；实现补全实例通过 `mask.patch`/`gold.patch` 表达实现遮蔽和参考答案。
+两类任务共享 `parser.py` 提取的 ArkTS/ETS 结构信息。错误实例保存排除构建产物与 `.git` 的变异仓库快照，并通过 `bug.patch`/`fix.patch` 表达错误注入和修复；实现补全实例通过 `mask.patch`/`gold.patch` 表达实现遮蔽和参考答案。
 
 ## 1. ArkTS AST 错误实例构造
 
 ### 1.1 模块组成
 
 - `parser.py`：扫描 `.ets`、`.ts` 文件，提取 imports、函数和容器节点、源码范围、修饰符及基础 metrics。
-- `bug_instance.py`：构建候选函数集合，分析调用出度和跨文件返回值消费者，执行 mutation，并生成快照、补丁和元数据。
+- `bug_instance.py`：构建候选函数集合，分析调用出度和跨文件调用者，枚举六类 mutation，并生成快照、补丁和元数据。
 - `../../tools/parse_arkts_syntax_tree.py`：生成语法树 JSONL 和汇总 JSON 的命令行入口。
 - `../../tools/build_arkts_bug_instance.py`：查看候选或生成错误 instance 的命令行入口。
 - `../../tests/test_bug_instance.py`：候选识别、错误注入、换行保留和补丁方向的自动化测试。
@@ -49,9 +49,9 @@ JSONL 中每条记录对应一个源码文件，包含：
 `find_bug_candidates()` 展开语法树中的函数节点，并筛选同时满足以下条件的普通函数或方法：
 
 1. 不是匿名函数或 callback；
-2. 存在可以自动替换的返回语句；
+2. 存在至少一个可安全单点修改的表达式或语句；
 3. 唯一调用出度达到 `min_out_degree`，默认值为 3；
-4. 返回值至少被 `min_downstream_consumers` 个跨文件下游函数消费，默认值为 2。
+4. 至少被 `min_downstream_consumers` 个跨文件下游函数调用，默认值为 2；调用既可以消费返回值，也可以依赖函数副作用。
 
 调用出度是在函数源码范围内提取的唯一调用目标数量。例如：
 
@@ -63,45 +63,49 @@ return result.every(checkItem)
 
 可得到 `createManager`、`manager.request` 和 `result.every` 等调用目标。重复调用同一目标只计算一次。
 
-#### 3. 识别跨文件消费者
+#### 3. 识别跨文件调用影响
 
 分析器利用 AST JSONL 中的 import 信息解析相对导入，并为 named、default、namespace 和别名导入建立调用匹配规则。调用点必须位于候选函数所在文件之外。
 
-当前认为以下情况实际消费了返回值：
+当前识别以下调用形态：
 
 - 赋值给变量，而且该变量在所属函数的后续代码中被使用；
 - 直接用于 `if`、`while`、`for` 等条件；
 - 直接作为当前函数的返回值；
 - 作为另一个函数调用的参数；
 - 进入 Promise `.then()` 链。
+- 作为独立调用语句执行，用于识别状态写入、通知、持久化等副作用路径。
 
-裸调用以及“赋值后从未使用”的调用不会计入下游消费者。多个调用点落在同一个下游函数时，只计为一个消费者。
+“赋值后从未使用”的调用不会计入下游调用者。多个调用点落在同一个下游函数时，只计为一个调用者。
 
-#### 4. 选择并注入 mutation
+#### 4. 枚举六类 mutation
 
-分析器从候选函数末尾向前查找可变异的 `return`，然后根据返回类型和原表达式推断错误值：
+分析器默认枚举以下保持语法和基础类型的单点变异：
 
-| 返回类型或表达式 | 注入值 |
-| --- | --- |
-| `boolean`、`Promise<boolean>` 或布尔表达式 | `false`，原值为 `false` 时使用 `true` |
-| `string` | `""` |
-| `number` | `0` |
-| 数组 | `[]` |
-| 其他类型 | `null` |
+| 算子 | 示例 | 置信度 |
+| --- | --- | --- |
+| `conditional_negation` | `if (ready)` → `if (!(ready))` | 高 |
+| `comparison_replacement` | `<` → `<=`、`===` → `!==` | 高 |
+| `logical_replacement` | `&&` → `||` | 高 |
+| `numeric_boundary` | `0` → `1`、`count - 1` 中的 `1` → `0` | 中 |
+| `assignment_replacement` | `+=` → `-=`、`++` → `--` | 高 |
+| `call_deletion` | 删除 `save()`、`notify()`、`refresh()` 等独立副作用调用 | 中 |
 
-候选函数按下游消费者数量、唯一调用出度、文件路径和源码行号排序。默认选择排名最高的候选，只替换目标返回语句所在的一行，并保留原文件的 LF 或 CRLF 换行格式。
+分析只在函数源码范围的有效代码中进行，忽略注释和字符串。调用删除还会排除日志调用，并要求方法名具有可观察副作用特征。每个函数可以产生多个不同类别和位置的 mutation，重复补丁会被去除。
+
+候选函数先按跨文件调用影响、返回值消费数量、调用出度和可用变异数排序。自动选择采用“算子分层 + 高影响函数优先 + seed 轮转”：默认 seed 由仓库名和 commit 稳定派生，使不同仓库自然分散到不同算子；`--selection-seed` 可复现或轮转选择，`--mutation-operator` 可限定单一算子。每个 instance 仍只修改一行或删除一条独立调用，并保留 LF/CRLF。
 
 #### 5. 生成 instance
 
-`create_bug_instance()` 直接根据目标文件的原始内容和 mutation 内容生成双向补丁，不复制仓库，也不写入注入错误后的源码快照。输入的语法树 JSONL 会复制为 instance 目录中的 `syntax_tree.jsonl`，与 `instance.json` 同级保存。
+`create_bug_instance()` 将源仓库复制为隔离快照，排除 `.git`、构建目录和依赖目录，再只向快照应用选中的 mutation；原始仓库不会被修改。同时根据目标文件的原始内容和 mutation 内容生成双向补丁，并在 `instance.json` 中记录构造时使用的语法树路径。
 
 输出目录必须位于源仓库之外，且不能与已有 instance 重名。默认结构如下：
 
 ```text
 instances/error_fix/<instance-id>/
+├── repo/          # 已注入单点错误的隔离仓库快照
 ├── bug.patch      # 原始代码 -> 错误代码
 ├── fix.patch      # 错误代码 -> 原始代码
-├── syntax_tree.jsonl
 └── instance.json  # instance 元数据和任务描述
 ```
 
@@ -112,7 +116,8 @@ instances/error_fix/<instance-id>/
 - 目标函数、源码范围、signature 和 modifiers；
 - 唯一调用出度和 callee 列表；
 - 跨文件消费函数、调用位置和消费类型；
-- mutation 前后的表达式与源码行；
+- mutation 算子、类别、置信度、源码范围以及变异前后文本；
+- 可复现的选择策略、seed、候选函数数和候选 mutation 数；
 - 原文件和错误文件的 SHA-256；
 - 使用“以下函数{functions}调用失败，找出错误”模板生成的任务 `description`。
 
@@ -143,8 +148,10 @@ python3 tools/build_arkts_bug_instance.py \
 | `--syntax-tree` | `syntax_trees/<repo-name>_syntax_tree.jsonl` | AST JSONL 路径 |
 | `--output-dir` | `instances/error_fix` | instance 父目录 |
 | `--min-out-degree` | `3` | 最小唯一调用出度 |
-| `--min-consumers` | `2` | 最小跨文件下游消费者数量 |
+| `--min-consumers` | `2` | 最小跨文件下游调用函数数量 |
 | `--instance-id` | 自动生成 | instance 目录名 |
+| `--mutation-operator` | 六类算子自动分层选择 | 仅使用指定 mutation 算子 |
+| `--selection-seed` | 仓库名与 commit 的稳定哈希 | 可复现地轮转算子、函数和变异位置 |
 | `--list-candidates` | 关闭 | 只输出候选 JSON，不生成 instance |
 
 在 Windows 工作区中可通过 WSL 执行同一命令：
@@ -160,11 +167,11 @@ wsl bash -lc "python3 tools/build_arkts_bug_instance.py test_project/Wechat_Harm
 ```text
 目标函数       PermissionUtils.request
 唯一调用出度   5
-下游消费者     3
-mutation       return isAuth -> return false
+跨文件调用者   3
+mutation       根据稳定 seed 从目标函数的可用算子中选择一个单点逻辑变异
 ```
 
-下游消费者包括：
+跨文件调用者包括：
 
 - `ChatPage.build.anonymous@361`；
 - `PhotoPickerUtils.openGallery`；
@@ -202,7 +209,7 @@ patch --dry-run -p1 -i ../instances/error_fix/<instance-id>/fix.patch
 - 主要解析相对 import，不解析工程路径别名、动态 import 或运行时注入；
 - 调用和返回值消费使用源码模式匹配，复杂跨行表达式可能无法识别；
 - 不处理反射、动态属性访问和运行时多态调用关系；
-- mutation 基于返回类型和表达式启发式推断，不保证每个错误都能通过编译；
+- mutation 使用轻量源码结构和启发式约束，不等价于完整类型检查，不能保证每个错误都能通过编译；
 - instance 生成阶段不会自动执行目标 HarmonyOS 项目的构建或测试。
 
 因此，生成 instance 后仍应结合 `fix.patch` dry-run、项目构建和测试结果进行最终确认。
