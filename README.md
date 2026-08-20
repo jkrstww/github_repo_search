@@ -12,6 +12,21 @@
 | 2.3 应用迁移实例构造 | 进行中 | 已实现基于 ArkTS AST 的 `android.*` 调用初筛 |
 | 2.4 仓库 Issue 解决实例构造 | 规划中 | 基于真实 Issue 构造问题修复任务 |
 
+## 环境与依赖
+
+根项目要求 Python 3.10 及以上版本，当前所有核心模块只使用 Python 标准库，因此根目录 [`pyproject.toml`](pyproject.toml) 中的 `dependencies = []` 是有意为空。`setuptools>=68` 是构建依赖，不是运行时依赖。
+
+Git、GNU `patch`、WSL 和 HarmonyOS SDK 等属于按场景使用的外部工具，不能通过 Python `dependencies` 安装。`src/SWE-bench/` 也是拥有独立 `pyproject.toml` 的子项目，其第三方依赖只用于 2.4 流程，不随根项目安装。完整的安装命令、依赖边界和环境矩阵见 [环境与依赖文档](ENVIRONMENT.md)。
+
+推荐的根项目安装方式：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools
+python -m pip install -e .
+```
+
 ## 1. GitHub Repo Filter
 
 GitHub Repo Filter 按关键字、仓库名、描述、README、主要语言、topic、owner/org 等条件搜索 GitHub 仓库，再用本地配置过滤创建时间、最近更新时间、stars、forks、license 等字段，最后把命中的仓库元数据以 JSONL 持久化到本地。该阶段只保存元数据，不 clone 仓库。
@@ -286,9 +301,9 @@ wsl bash -lc "python3 tools/parse_arkts_syntax_tree.py test_project/Wechat_Harmo
 
 #### 错误实例构造
 
-项目可以基于已提取的 ArkTS 抽象语法树，自动筛选高调用出度且返回值被多个跨文件函数消费的函数，通过 `bug.patch` 表达返回值错误，并生成 `fix.patch`、`syntax_tree.jsonl` 和包含下游消费者描述的 `instance.json`。生成目录不复制仓库，原始 clone 也不会被修改。
+项目可以基于已提取的 ArkTS 抽象语法树，自动筛选高调用出度且被多个跨文件函数调用的目标函数。生成器会枚举条件取反、比较符替换、逻辑符替换、数值边界、赋值运算符替换和独立副作用调用删除六类单点 mutation，通过 `bug.patch` 表达错误，并生成隔离的变异仓库快照、`fix.patch` 和包含调用影响证据的 `instance.json`。生成目录不修改原始 clone。
 
-当前 Wechat 示例选择 `PermissionUtils.request`，将 `return isAuth` 变异为 `return false`，生成的实例位于 `instances/error_fix/wechat-permission-request-return-false/`。
+候选选择采用可复现的“算子分层 + 影响面排序 + seed 轮转”策略，避免所有实例集中在同一函数或同一种错误。默认 seed 由仓库名和 commit 稳定派生，也可以用 `--mutation-operator` 和 `--selection-seed` 显式控制。面向求解者的任务描述只呈现受影响调用路径和错误类别，具体变异前后文本仅保存在评测元数据中，避免直接泄露答案。
 
 完整的分析规则、注入流程、命令参数、instance 格式、验证方式和已知边界见 [ArkTS AST 错误实例构造文档](src/arkts_syntax_tree/README.md)。
 
