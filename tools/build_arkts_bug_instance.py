@@ -9,7 +9,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from arkts_syntax_tree import create_bug_instance, find_bug_candidates
+from arkts_syntax_tree import (
+    DEFAULT_MUTATION_OPERATORS,
+    create_bug_instance,
+    find_bug_candidates,
+)
 
 
 def positive_int(value: str) -> int:
@@ -22,8 +26,8 @@ def positive_int(value: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Find an ArkTS function with high call out-degree and cross-file return-value "
-            "consumers, then create a mutated repository instance and its repair patch."
+            "Find an impactful ArkTS function, apply one of six type-safe mutation "
+            "operators, then create a repository instance and its repair patch."
         ),
     )
     parser.add_argument("repo", type=Path, help="HarmonyOS/ArkTS repository root")
@@ -52,6 +56,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--instance-id", help="explicit instance directory name")
     parser.add_argument(
+        "--mutation-operator",
+        choices=DEFAULT_MUTATION_OPERATORS,
+        help="restrict generation/listing to one mutation operator",
+    )
+    parser.add_argument(
+        "--selection-seed",
+        type=int,
+        help="deterministic diversity seed; default derives from repository and commit",
+    )
+    parser.add_argument(
         "--list-candidates",
         action="store_true",
         help="print matching candidates as JSON without creating an instance",
@@ -69,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                 syntax_tree,
                 min_out_degree=args.min_out_degree,
                 min_downstream_consumers=args.min_consumers,
+                mutation_operators=[args.mutation_operator] if args.mutation_operator else None,
             )
             print(json.dumps([candidate.to_dict() for candidate in candidates], ensure_ascii=False, indent=2))
             return 0
@@ -80,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
             min_out_degree=args.min_out_degree,
             min_downstream_consumers=args.min_consumers,
             instance_id=args.instance_id,
+            mutation_operator=args.mutation_operator,
+            selection_seed=args.selection_seed,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -89,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     function = target["function"]
     print(
         f"instance={instance['instance_id']} target={function['qualified_name']} "
-        f"out_degree={target['out_degree']} consumers={target['downstream_function_count']}"
+        f"operator={target['mutation']['operator_id']} out_degree={target['out_degree']} "
+        f"callers={target['downstream_function_count']}"
     )
     instance_dir = args.output_dir / instance["instance_id"]
     print(f"syntax_tree={instance_dir / 'syntax_tree.jsonl'}")
