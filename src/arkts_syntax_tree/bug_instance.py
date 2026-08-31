@@ -330,6 +330,7 @@ def create_bug_instance(
     instance_id: str | None = None,
     mutation_operator: str | None = None,
     selection_seed: int | None = None,
+    candidate_identity: str | None = None,
 ) -> dict[str, Any]:
     repo = Path(repo_root).resolve()
     syntax_tree = Path(syntax_tree_path).resolve()
@@ -355,7 +356,16 @@ def create_bug_instance(
         seed_material = f"{repo.name}:{commit or ''}"
         effective_seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
     effective_seed = max(effective_seed, 0)
-    candidate, mutation = select_candidate_mutation(candidates, seed=effective_seed)
+    if candidate_identity is not None:
+        matching = [
+            item for item in candidates if item.function.identity == candidate_identity
+        ]
+        if not matching:
+            raise ValueError(f"candidate not found: {candidate_identity}")
+        candidate = matching[0]
+        mutation = candidate.mutations[effective_seed % len(candidate.mutations)]
+    else:
+        candidate, mutation = select_candidate_mutation(candidates, seed=effective_seed)
     instance_name = instance_id or _default_instance_id(repo.name, candidate.function, mutation)
     instance_dir = output / instance_name
     snapshot_repo = instance_dir / "repo"

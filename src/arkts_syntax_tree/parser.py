@@ -1,3 +1,31 @@
+"""HarmonyOS ArkTS/TypeScript 源码的轻量级结构提取器。
+
+本模块扫描仓库中的 ``.ets`` 和 ``.ts`` 文件，在保留源码位置的同时屏蔽注释与
+字符串，再通过正则匹配和花括号层级识别导入、调用、声明、属性、方法、UI 组件
+及回调等结构。解析结果以 :class:`ParsedFile` 和 :class:`SyntaxNode` 表示，可写入
+逐文件 JSONL，并生成仓库级节点、导入、调用和最大深度统计。
+
+输入可以是待扫描的仓库根目录，也可以是单个文件的源码文本及其相对路径；仓库
+扫描默认读取 ``.ets``、``.ts`` 文件，并跳过版本控制、依赖和构建产物目录。内存中
+的输出为 ``ParsedFile`` 列表，每项包含文件路径、语言、imports、calls、语法树和
+metrics。写入文件时，JSONL 每行对应一个源文件；可选的汇总 JSON 包含文件数、
+导入数、调用数、节点数、最大树深度及各节点类型计数。
+
+命令行入口为 ``python tools/parse_arkts_syntax_tree.py repo [选项]``，参数如下：
+
+* ``repo``：必填位置参数，待解析的 HarmonyOS/ArkTS 项目根目录；
+* ``--output PATH``：语法树 JSONL 路径，默认写入
+  ``syntax_trees/<仓库名>_syntax_tree.jsonl``；
+* ``--summary PATH``：汇总 JSON 路径，默认写入
+  ``syntax_trees/<仓库名>_syntax_tree_summary.json``；
+* ``--extension EXT``：要扫描的源码扩展名，可重复指定；未指定时扫描 ``.ets`` 和
+  ``.ts``；
+* ``--pretty``：将每条 JSONL 记录格式化为带缩进的 JSON，默认输出紧凑 JSON。
+
+这里实现的是面向 benchmark 构造与迁移检测的容错型结构分析，并非完整的 ArkTS
+语法解析器；它侧重稳定提取后续实例生成所需的文件位置、签名、修饰符和层级信息。
+"""
+
 from __future__ import annotations
 
 import json
