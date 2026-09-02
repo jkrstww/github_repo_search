@@ -264,7 +264,29 @@ def _shell_patch(patch: str) -> str:
 
 def _dockerfile(repo_url: str, commit: str) -> str:
     safe_url = repo_url.replace("\\", "\\\\").replace('"', '\\"')
-    return f"""FROM node:20-slim\nRUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git patch ripgrep python3 python3-pytest \\\n    && ln -s /usr/bin/python3 /usr/local/bin/python \\\n    && npm install -g @openai/codex \\\n    && rm -rf /var/lib/apt/lists/*\nRUN git clone {safe_url!r} /workspace/repo && cd /workspace/repo && git checkout {commit}\nCOPY error.patch /tmp/error.patch\nRUN cd /workspace/repo \\\n    && git apply /tmp/error.patch \\\n    && rm -rf .git \\\n    && git init --initial-branch=masked \\\n    && git config user.name 'ArkTS Benchmark' \\\n    && git config user.email 'benchmark@localhost' \\\n    && git add -A \\\n    && git commit -m 'Masked task baseline'\nWORKDIR /workspace/repo\n"""
+    return f"""FROM node:20-slim AS masked-repo
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git patch \\
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone {safe_url!r} /workspace/repo && cd /workspace/repo && git checkout {commit}
+COPY error.patch /tmp/error.patch
+RUN cd /workspace/repo \\
+    && git apply /tmp/error.patch \\
+    && rm -f /tmp/error.patch \\
+    && rm -rf .git \\
+    && git init --initial-branch=masked \\
+    && git config user.name 'ArkTS Benchmark' \\
+    && git config user.email 'benchmark@localhost' \\
+    && git add -A \\
+    && git commit -m 'Masked task baseline'
+
+FROM node:20-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git patch ripgrep python3 python3-pytest \\
+    && ln -s /usr/bin/python3 /usr/local/bin/python \\
+    && npm install -g @openai/codex \\
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=masked-repo /workspace/repo /workspace/repo
+WORKDIR /workspace/repo
+"""
 
 
 def _docker_compose() -> str:
@@ -339,7 +361,10 @@ def _write_instance(destination: Path, *, repo_url: str, commit: str, metadata_r
     instruction = (
         "Restore the complete implementation of the following ArkTS function. Preserve its public declaration and surrounding code, and make all tests pass:\n\n"
         + "\n".join(f"- `{item.qualified_name}` in `{item.path}`" for item in functions)
-        + "\n"
+        + "\n\n"
+        + "## Restrictions\n\n"
+        + "- Do not use external network or remote Git resources to search for the solution. This includes git clone, git fetch, git pull, git remote, GitHub/GitLab APIs, web search, curl, wget, Python/Node HTTP requests, and any equivalent tool or command.\n"
+        + "- Do not inspect benchmark answer artifacts or agent/session logs outside the repository working tree, including error.patch, gold.patch, /tmp, or Codex session files. Recover the implementation only from the checked-out repository, its local history, and the task context.\n"
     )
     (destination / "instruction.md").write_text(instruction, encoding="utf-8")
     (destination / "error.patch").write_text(error_patch, encoding="utf-8", newline="")
