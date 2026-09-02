@@ -22,6 +22,20 @@
     --min-out-degree、--min-consumers、--min-downstream-dependencies、
     --mutation-operator：候选函数筛选条件。
 
+语法树来源与作用：
+    --syntax-tree 不是第二个仓库，而是语法树索引 JSONL 文件的路径。脚本先
+    将 --repo 准备到本地 checkout，再使用本地源码生成或读取该索引；语法树
+    用于展开函数目录、分析导入和调用关系，并筛选高影响候选函数。
+    --repo 为远程地址时，仓库准备阶段执行 git clone 并需要相应网络；为本地
+    Git 仓库时也会复制到临时 checkout，避免修改原目录。语法树本身不通过
+    GitHub/Git API 获取，也不访问网络，而是递归读取 checkout 中的 .ets 和
+    .ts 文件，由项目内置的轻量解析器提取文件、类、函数、方法、属性、导入、
+    调用、签名、行号和嵌套关系等信息。
+    未指定 --syntax-tree 时，脚本在 checkout 根目录生成
+    <repo-name>_syntax_tree.jsonl 及对应的汇总 JSON，并会先删除同名旧文件以
+    避免使用过期结果；显式指定且文件已存在时直接复用，因此应确保它与当前
+    checkout 的仓库版本匹配。
+
 输出：
     默认在 --output-dir 下创建两个实例目录（*_0、*_1）。每个目录包含
     instruction.md、instance.json、environment/、tests/ 和 solution/；其中
