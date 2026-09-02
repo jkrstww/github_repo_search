@@ -1,9 +1,36 @@
-"""Build two independent Harbor tasks for the highest-ranked ArkTS functions.
+"""生成 ArkTS 函数修复用的 Harbor 评测实例。
 
-The candidate analysis, ordering, syntax-tree generation, and masking rules are
-shared with :mod:`tools.build_arkts_bug_mask_instance`.  This adapter packages
-Each selected function is masked in a fresh checkout and packaged as its own
-Harbor task; Codex creates a focused regression test for each task.
+脚本用途：
+    从指定 Git 仓库分析 ArkTS 函数及其依赖关系，选择排序靠前的候选函数，
+    将每个候选函数替换为掩码实现，并为每个函数生成一个独立的 Harbor
+    任务。任务包含待修复的仓库快照、错误补丁、标准答案补丁、回归测试和
+    Docker 运行环境，供 Codex 或其他代理执行函数恢复评测。
+
+基本用法：
+    python tools/build_arkts_bug_harbor_instance.py --repo <仓库地址或本地路径>
+
+主要输入：
+    --repo：必填。GitHub owner/name、Git URL 或本地 Git 仓库路径。
+    --syntax-tree：可选，已有的 ArkTS 语法树 JSONL 文件；省略时在 checkout
+        根目录下生成。
+    --output-dir：实例输出目录，默认是 harbor_instances/。
+    --checkout-root：临时仓库 checkout 根目录，默认是 .tmp/arkts-harbor-checkouts/。
+    --instance-id：实例 ID 前缀；脚本会追加 _0 和 _1。
+    --skip-codex：跳过自动调用 Codex 生成回归测试，适合仅构建任务骨架。
+    --list-candidates：只将符合筛选条件的候选函数以 JSON 输出到标准输出，
+        不创建 Harbor 实例。
+    --min-out-degree、--min-consumers、--min-downstream-dependencies、
+    --mutation-operator：候选函数筛选条件。
+
+输出：
+    默认在 --output-dir 下创建两个实例目录（*_0、*_1）。每个目录包含
+    instruction.md、instance.json、environment/、tests/ 和 solution/；其中
+    environment/Dockerfile 构建掩码后的仓库，tests/ 保存验证脚本和测试补丁，
+    solution/ 保存标准答案及其执行脚本。候选列表模式只输出 JSON，不写实例。
+
+候选分析、排序、语法树生成和掩码规则复用
+:mod:`tools.build_arkts_bug_mask_instance`；每个选中的函数都在独立 checkout
+中处理，以避免不同 Harbor 实例之间相互影响。
 """
 
 from __future__ import annotations
