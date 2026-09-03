@@ -275,8 +275,11 @@ Instance 生成阶段以筛选出的真实 HarmonyOS 仓库为基础，保存任
 工作区提供一个通用 HarmonyOS ArkTS/ETS 结构解析脚本，不需要写入被解析的目标仓库：
 
 ```powershell
-wsl bash -lc "python3 tools/parse_arkts_syntax_tree.py test_project/Wechat_HarmonyOS"
+git clone https://github.com/ausboyue/Wechat_HarmonyOS test_project/Wechat_HarmonyOS
+python tools/parse_arkts_syntax_tree.py test_project/Wechat_HarmonyOS
 ```
+
+脚本只依赖 Python 标准库，可以直接在 Windows、Linux 或 macOS 中运行，不要求 WSL。`test_project/` 已被 Git 忽略，因此首次运行示例前需要自行 clone 目标仓库；也可以把最后一个参数替换为任意已有 HarmonyOS/ArkTS 仓库的路径。
 
 默认扫描 `.ets` 和 `.ts` 文件，跳过 `.git`、`build`、`node_modules`、`oh_modules` 等目录，输出到工作区：
 
