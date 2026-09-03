@@ -332,47 +332,7 @@ WORKDIR /workspace/repo
 
 def _docker_compose() -> str:
     return """services:
-  main:
-    networks:
-      - agent
-    depends_on:
-      - model-gateway
-  model-gateway:
-    image: node:20-slim
-    environment:
-      MODEL_ENDPOINT_HOST: "${ARKTS_MODEL_ENDPOINT_HOST:-api.openai.com}"
-    command:
-      - node
-      - -e
-      - |
-        const http = require("http");
-        const https = require("https");
-        const upstreamHost = process.env.MODEL_ENDPOINT_HOST;
-        http.createServer((request, response) => {
-          const headers = { ...request.headers, host: upstreamHost };
-          const upstream = https.request({
-            hostname: upstreamHost,
-            port: 443,
-            method: request.method,
-            path: request.url,
-            headers,
-          }, upstreamResponse => {
-            response.writeHead(upstreamResponse.statusCode, upstreamResponse.headers);
-            upstreamResponse.pipe(response);
-          });
-          upstream.on("error", error => {
-            response.writeHead(502, { "content-type": "text/plain" });
-            response.end(error.message);
-          });
-          request.pipe(upstream);
-        }).listen(8080, "0.0.0.0");
-    networks:
-      - agent
-      - outbound
-networks:
-  agent:
-    internal: true
-  outbound: {}
+  main: {}
 """
 
 
