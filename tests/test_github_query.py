@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import unittest
+import urllib.error
+from email.message import Message
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -169,6 +171,42 @@ class BuildSearchQueryTest(unittest.TestCase):
         self.assertEqual([len(page.repositories) for page in pages], [100, 50])
         self.assertEqual(pages[-1].fetched_count, 150)
         self.assertEqual(pages[-1].target_count, 150)
+
+    def test_request_waits_for_rate_limit_and_retries(self) -> None:
+        headers = Message()
+        headers["X-RateLimit-Remaining"] = "0"
+        headers["X-RateLimit-Reset"] = "101"
+        limited = urllib.error.HTTPError(
+            "https://api.github.com/search/repositories",
+            403,
+            "Forbidden",
+            headers,
+            None,
+        )
+        limited.read = lambda: b'{"message":"API rate limit exceeded"}'
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"total_count":0,"items":[]}'
+
+        with (
+            patch.object(github.urllib.request, "urlopen", side_effect=[limited, response]) as urlopen,
+            patch.object(github.time, "time", return_value=100),
+            patch.object(github.time, "sleep") as sleep,
+        ):
+            payload = github._request_json({"q": "test"}, token="token", timeout=30)
+
+        self.assertEqual(payload["total_count"], 0)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(2.0)
+
+    def test_request_sends_token_as_bearer_authorization(self) -> None:
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"total_count":0,"items":[]}'
+
+        with patch.object(github.urllib.request, "urlopen", return_value=response) as urlopen:
+            github._request_json({"q": "test"}, token="secret-token", timeout=30)
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret-token")
 
 
 if __name__ == "__main__":

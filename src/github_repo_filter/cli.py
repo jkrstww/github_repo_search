@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .config import as_list, load_config
+from .config import as_list, load_config, load_env_value
 from .filters import filter_repositories, rejection_reasons
 from .github import MAX_SEARCH_RESULTS, GitHubApiError, SearchPage, build_search_queries, iter_search_repositories
 from .jsonl import repository_to_record, write_jsonl
@@ -34,7 +33,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             return 0
 
-        token = os.environ.get(args.token_env)
+        token, token_source = load_env_value(args.token_env)
+        if token:
+            print(f"GitHub authentication: using {args.token_env} from {token_source}", file=sys.stderr)
+        else:
+            print(
+                f"warning: {args.token_env} is not set in the environment or .env; "
+                "GitHub requests will use the much lower anonymous rate limit",
+                file=sys.stderr,
+            )
         state = RunState()
         progress = ProgressBar(disabled=args.no_progress)
         total_limit = _global_max_results(search.get("max_results"))
