@@ -11,21 +11,7 @@
 | 2.2 接口/基类实现补全实例构造 | 已实现 | mask 已有实现文件，并以恢复原实现的 patch 作为 gold label |
 | 2.3 应用迁移实例构造 | 进行中 | 已实现基于 ArkTS AST 的 `android.*` 调用初筛 |
 | 2.4 仓库 Issue 解决实例构造 | 规划中 | 基于真实 Issue 构造问题修复任务 |
-
-## 环境与依赖
-
-根项目要求 Python 3.10 及以上版本，当前所有核心模块只使用 Python 标准库，因此根目录 [`pyproject.toml`](pyproject.toml) 中的 `dependencies = []` 是有意为空。`setuptools>=68` 是构建依赖，不是运行时依赖。
-
-Git、GNU `patch`、WSL 和 HarmonyOS SDK 等属于按场景使用的外部工具，不能通过 Python `dependencies` 安装。`src/SWE-bench/` 也是拥有独立 `pyproject.toml` 的子项目，其第三方依赖只用于 2.4 流程，不随根项目安装。完整的安装命令、依赖边界和环境矩阵见 [环境与依赖文档](ENVIRONMENT.md)。
-
-推荐的根项目安装方式：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools
-python -m pip install -e .
-```
+| 2.5 函数 mask + LLM 生成测试文件 harbor instance 构造 (主要方法)
 
 ## 1. GitHub Repo Filter
 
@@ -562,6 +548,69 @@ snapshot reverse apply and clean check: passed
 严格准入检查显示，该仓库的 295 个 merged PR 中，没有 PR 使用 SWE-bench 支持的 closing Issue 方式关联独立 Issue；只有 3 个 PR 包含测试文件变更，这 3 个 PR 同样没有关联 Issue。PR #349 的 `resolved_issues=[]`，所以原始 `build_dataset` 按预期没有生成候选。
 
 为验证剩余流程，本次没有伪造 Issue 编号，而是明确采用“PR 标题作为 `problem_statement`”的兼容降级，并使用静态脚本替代缺失的测试补丁。当前环境也没有 DevEco Studio、`ohpm` 或可执行的 hvigor wrapper，因此未运行原生 HarmonyOS 构建。结论是：该实例可用于验证 HarmonyOS PR 采集、gold patch 构造和静态验收流程，但不能作为严格满足真实 Issue 关联和测试补丁要求的 SWE-bench 评测实例。完整过程见 `src/SWE-bench/README.md`。
+
+### 2.5 函数 mask + LLM 生成测试文件 harbor instance 构造
+
+`tools/build_arkts_bug_harbor_instance.py` 用于从一个真实 ArkTS/HarmonyOS Git 仓库中构造两个函数恢复任务。脚本先在临时 checkout 中生成或读取语法树，结合函数调用图筛选高影响候选函数，再将候选函数的函数体替换为 mask。每个候选函数都会生成一个独立的 Harbor task，求解者需要在保持函数声明和周围代码不变的前提下恢复实现。
+
+#### 构造流程
+
+1. **准备仓库快照**：`--repo` 支持 GitHub `owner/name`、Git URL 和本地 Git 仓库。仓库会复制或克隆到 `--checkout-root` 下的临时目录，原始目录不会被修改；记录 checkout 的 `HEAD` commit，作为 Harbor 环境中的固定版本。
+2. **生成候选函数**：未指定 `--syntax-tree` 时，脚本在 checkout 根目录生成 `<repo-name>_syntax_tree.jsonl` 及汇总 JSON。候选分析复用 `build_arkts_bug_mask_instance.py`，默认要求函数出度至少为 1、下游依赖数至少为 1，并按影响面排序，取前两个候选函数。
+3. **生成错误和标准答案补丁**：脚本恢复到原始 commit 后逐个处理候选函数，用 `_mask_function` 替换实现，分别保存从原实现到 mask 的 `error.patch` 和从 mask 到原实现的 `solution/gold.patch`。每个实例都从干净 checkout 开始，避免不同实例互相污染。
+4. **生成并验证测试**：默认调用 Codex（可通过 `--codex-cli`、`--model` 和 `--codex-sandbox` 配置）只创建 `tests/test_outputs.py`。脚本检查 Codex 是否只修改该文件，先确认测试在 mask 代码上失败，再应用 gold patch 确认恢复后通过。测试必须执行目标函数并检查可观察行为，不能只检查函数体非空或复制标准答案。
+5. **写出 Harbor task**：每个实例包含 `instruction.md`、`instance.json`、`error.patch`、`tests/`、`solution/` 和 `environment/`。环境使用 Node.js Docker 镜像，安装 Python/pytest、Node.js 和 Codex；`tests/test.sh` 应用测试补丁并运行 `pytest`，`solution/solve.sh` 应用标准答案补丁。完成后默认删除临时 checkout，使用 `--keep-checkout` 可保留。
+
+#### 单仓库用法
+
+```bash
+# 默认生成两个实例，输出到 harbor_instances/
+python tools/build_arkts_bug_harbor_instance.py --repo owner/repository
+
+# 指定模型并保留临时 checkout，便于检查语法树和中间文件
+python tools/build_arkts_bug_harbor_instance.py \
+  --repo owner/repository \
+  --model gpt-5.6-sol \
+  --keep-checkout
+
+# 只查看按当前筛选条件排序的候选函数，不创建实例
+python tools/build_arkts_bug_harbor_instance.py \
+  --repo owner/repository \
+  --list-candidates
+```
+
+主要参数如下：
+
+- `--output-dir`：实例输出根目录，默认 `harbor_instances/`。
+- `--checkout-root`：临时 checkout 根目录，默认 `.tmp/arkts-harbor-checkouts/`。
+- `--syntax-tree`：复用已有语法树 JSONL；必须与当前 checkout 版本匹配。
+- `--instance-id`：实例 ID 前缀，最终生成 `<prefix>_0` 和 `<prefix>_1`。
+- `--min-out-degree`、`--min-consumers`、`--min-downstream-dependencies`：候选函数筛选阈值。
+- `--mutation-operator`：限定候选使用的变异算子，如 `conditional_negation`、`comparison_replacement` 或 `call_deletion`。
+- `--skip-codex`：跳过 LLM 测试生成，仅对 `entry/src/ohosTest/ets/test/Ability.test.ets` 提供内置 Hypium/Node VM 行为测试回退；其他函数会直接报错，不会生成不充分的测试。
+
+#### 批量构造和评测
+
+对仓库 JSONL 清单可以使用批处理包装脚本。它默认处理前 20 条记录，检测到输出目录中已有同仓库 instance 时跳过，单个仓库失败后继续处理后续记录：
+
+```bash
+python tools/build_arkts_bug_harbor_batch.py \
+  data/repositories_harmony_stars_gt10_language_typescript_harmonyos_arkts_PR_merged_gpt_filter.jsonl \
+  --output-dir harbor_instances \
+  --model gpt-5.6-sol \
+  --max-repos 20
+```
+
+生成 task 后，可对单个 Harbor instance 启动 Codex 评测：
+
+```bash
+harbor run \
+  --path harbor_instances/<instance-id> \
+  --agent codex \
+  --model gpt-5.6-sol
+```
+
+评测结果写入 `jobs/`（或通过 `--jobs-dir` 指定的目录），其中 `verifier/reward.txt` 为测试奖励结果，`trial.log` 和 `agent/` 保存环境及代理执行日志。若 Codex 无法连接模型服务，应先检查 Docker 环境的网络和代理配置，再区分环境错误、代理超时与测试失败。
 
 ## 开发与测试
 
