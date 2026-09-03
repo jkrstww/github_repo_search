@@ -617,3 +617,26 @@ harbor run \
 ```powershell
 python -m unittest discover -s tests
 ```
+
+## 注意事项
+使用 harbor 进行测试的指令是 harbor run -p <instance_path> -a agent -m model
+如果使用的不是官方 api 接口，那么执行以下指令：
+harbor run \
+  -p <instance_path> \
+  -a agent \
+  -m model \
+  --agent-env CODEX_FORCE_AUTH_JSON=TrUe \
+  --agent-env OPENAI_BASE_URL=<your api proxy>
+
+为什么 CODEX_FORCE_AUTH_JSON 不设置为 1？
+
+harbor 脱敏方式有 bug: 
+
+具体过程：
+  1. Harbor 用正则判断敏感环境变量名：
+     (KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH)
+     所以 CODEX_FORCE_AUTH_JSON 因包含 AUTH 被视为敏感变量。
+  2. 它读取该变量的值 1，将字符串 "1" 加入待脱敏内容。
+  3. 任务结束时，Harbor 对 job 目录下所有文本文件执行全局替换：
+     text.replace("1", "[REDACTED]")
+  因此 trajectory.json 中所有字符 1 都会被替换
