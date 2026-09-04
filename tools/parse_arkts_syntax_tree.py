@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     default_output_dir = PROJECT_ROOT / "syntax_trees"
     output = args.output or default_output_dir / f"{repo.name}_syntax_tree.jsonl"
     summary = args.summary or default_output_dir / f"{repo.name}_syntax_tree_summary.json"
+    output_reference = args.output or Path("syntax_trees") / f"{repo.name}_syntax_tree.jsonl"
 
     try:
         parsed_files = parse_repository(repo, extensions=args.extension or [".ets", ".ts"])
@@ -45,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
             parsed_files,
             output_path=output,
             summary_path=summary,
+            output_reference=output_reference,
             pretty=args.pretty,
         )
     except (OSError, ValueError) as exc:

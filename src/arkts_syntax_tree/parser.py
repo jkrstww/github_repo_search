@@ -115,6 +115,10 @@ def iter_source_files(
     extensions: Iterable[str] = SOURCE_EXTENSIONS,
 ) -> list[Path]:
     root_path = Path(root)
+    if not root_path.exists():
+        raise FileNotFoundError(f"repository path does not exist: {root_path}")
+    if not root_path.is_dir():
+        raise NotADirectoryError(f"repository path is not a directory: {root_path}")
     extension_set = {extension.lower() for extension in extensions}
     paths: list[Path] = []
     for path in root_path.rglob("*"):
@@ -124,7 +128,7 @@ def iter_source_files(
             continue
         if path.suffix.lower() in extension_set:
             paths.append(path)
-    return sorted(paths)
+    return sorted(paths, key=lambda path: path.relative_to(root_path).as_posix())
 
 
 def parse_source(source: str, *, path: str) -> ParsedFile:
@@ -187,6 +191,7 @@ def write_syntax_tree_outputs(
     *,
     output_path: str | Path,
     summary_path: str | Path | None = None,
+    output_reference: str | Path | None = None,
     pretty: bool = False,
 ) -> dict[str, Any]:
     output = Path(output_path)
@@ -196,7 +201,10 @@ def write_syntax_tree_outputs(
             fp.write(json.dumps(parsed_file.to_dict(), ensure_ascii=False, indent=2 if pretty else None))
             fp.write("\n")
 
-    summary = build_repository_summary(parsed_files, output_path=output)
+    summary = build_repository_summary(
+        parsed_files,
+        output_path=Path(output_reference) if output_reference is not None else output,
+    )
     if summary_path is not None:
         summary_output = Path(summary_path)
         summary_output.parent.mkdir(parents=True, exist_ok=True)
@@ -229,7 +237,7 @@ def build_repository_summary(parsed_files: list[ParsedFile], *, output_path: Pat
         "node_types": dict(sorted(node_types.items())),
     }
     if output_path is not None:
-        summary["output"] = str(output_path)
+        summary["output"] = output_path.as_posix()
     return summary
 
 
