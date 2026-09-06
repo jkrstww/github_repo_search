@@ -110,3 +110,10 @@
   `compare.json`，并在每个 sample 目录生成 `analyse.md`。单个 sample 失败时会
   继续处理其余目录，进程结束时汇总失败项；可用 `--timeout` 调整每条轨迹的分析
   超时时间。
+
+  ## 单条轨迹量化评分
+
+  `trajectory_scoring_prompt.md` 提供基于 `rubric.md` 的单条轨迹评测提示词。将
+  `{{TRAJECTORY_PATH}}` 替换为 `trajectory.json` 路径后交给评测模型，模型会先建立
+  issue-specific oracle，再按 A-F 六个维度评分、应用封顶规则，并只返回严格 JSON，
+  方便批量收集过程分、证据置信度和风险标记。
