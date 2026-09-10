@@ -1,0 +1,1923 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "django__django-14011",
+  "agent": {
+    "name": "mini-swe-agent",
+    "version": "2.4.2",
+    "model_name": "gemini-3-5-flash-fair",
+    "extra": {
+      "original_format": "mini-swe-agent-1.1",
+      "agent_config": {
+        "system_template": "You are a helpful assistant that can interact with a computer shell to solve programming tasks.\n",
+        "instance_template": "<pr_description>\nConsider the following PR description:\n{{task}}\n</pr_description>\n\n<instructions>\n# Task Instructions\n\n## Overview\n\nYou're a software engineer interacting continuously with a computer by submitting commands.\nYou'll be helping implement necessary changes to meet requirements in the PR description.\nYour task is specifically to make changes to non-test files in the current directory in order to fix the issue described in the PR description in a way that is general and consistent with the codebase.\n<IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command, see the result, then think and issue your next command(s).</important>\n\nFor each response:\n\n1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish\n2. Provide one or more bash tool calls to execute\n\n## Important Boundaries\n\n- MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)\n- DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)\n\n## Recommended Workflow\n\n1. Analyze the codebase by finding and reading relevant files\n2. Create a script to reproduce the issue\n3. Edit the source code to resolve the issue\n4. Verify your fix works by running your script again\n5. Test edge cases to ensure your fix is robust\n\n## Command Execution Rules\n\nYou are operating in an environment where\n\n1. You issue at least one command\n2. The system executes the command(s) in a subshell\n3. You see the result(s)\n4. You write your next command(s)\n\nEach response should include:\n\n1. **Reasoning text** where you explain your analysis and plan\n2. At least one tool call with your command\n\n**CRITICAL REQUIREMENTS:**\n\n- Your response SHOULD include reasoning text explaining what you're doing\n- Your response MUST include AT LEAST ONE bash tool call. You can make MULTIPLE tool calls in a single response when the commands are independent (e.g., searching multiple files, reading different parts of the codebase).\n- Directory or environment variable changes are not persistent. Every action is executed in a new subshell.\n- However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files\n\nExample of a CORRECT response:\n<example_response>\nI need to understand the Builder-related code. Let me find relevant files and check the project structure.\n\n[Makes multiple bash tool calls: {\"command\": \"ls -la\"}, {\"command\": \"find src -name '*.java' | grep -i builder\"}, {\"command\": \"cat README.md | head -50\"}]\n</example_response>\n\n## Environment Details\n\n- You have a full Linux shell environment\n- Always use non-interactive flags (-y, -f) for commands\n- Avoid interactive tools like vi, nano, or any that require user input\n- You can use bash commands or invoke any tool that is available in the environment\n- You can also create new tools or scripts to help you with the task\n- If a tool isn't available, you can also install it\n\n## Submission\n\nWhen you've completed your work, you MUST submit your changes as a git patch.\nFollow these steps IN ORDER, with SEPARATE commands:\n\nStep 1: Create the patch file\nRun `git diff -- path/to/file1 path/to/file2 > patch.txt` listing only the source files you modified.\nDo NOT commit your changes.\n\n<IMPORTANT>\nThe patch must only contain changes to the specific source files you modified to fix the issue.\nDo not submit file creations or changes to any of the following files:\n\n- test and reproduction files\n- helper scripts, tests, or tools that you created\n- installation, build, packaging, configuration, or setup scripts unless they are directly part of the issue you were fixing (you can assume that the environment is already set up for your client)\n- binary or compiled files\n</IMPORTANT>\n\nStep 2: Verify your patch\nInspect patch.txt to confirm it only contains your intended changes and headers show `--- a/` and `+++ b/` paths.\n\nStep 3: Submit (EXACT command required)\nYou MUST use this EXACT command to submit:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt\n```\n\nIf the command fails (nonzero exit status), it will not submit.\n\n<CRITICAL>\n- Creating/viewing the patch and submitting it MUST be separate commands (not combined with &&).\n- If you modify patch.txt after verifying, you SHOULD verify again before submitting.\n- You CANNOT continue working (reading, editing, testing) in any way on this task after submitting.\n</CRITICAL>\n</instructions>\n",
+        "step_limit": 250,
+        "cost_limit": 3.0,
+        "wall_time_limit_seconds": 0,
+        "max_consecutive_format_errors": 3,
+        "output_path": null
+      }
+    }
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "system",
+      "message": "You are a helpful assistant that can interact with a computer shell to solve programming tasks."
+    },
+    {
+      "step_id": 2,
+      "source": "user",
+      "message": "<pr_description>\nConsider the following PR description:\nLiveServerTestCase's ThreadedWSGIServer doesn't close database connections after each thread\nDescription\n\t\nIn Django 2.2.17, I'm seeing the reappearance of #22414 after it was fixed in 1.11. #22414 is the issue where the following error will occur at the conclusion of a test run when destroy_test_db() is called:\nOperationalError: database \"test_myapp\" is being accessed by other users\nThis error happens when not all of the database connections are closed. In my case today, I'm seeing this when running a single test that is a LiveServerTestCase. I see it in approximately half of my test runs, so it's not wholly deterministic (it's a race condition).\nThere weren't a whole lot of changes in the LiveServerTestCase-related code between 1.11 and 2.2, so I looked at them individually.\nIssue #20238 added threading support to LiveServerTestCase. One of the changes it made ​was changing LiveServerThread to use ThreadedWSGIServer instead of WSGIServer. LiveServerThread is used by LiveServerTestCase.\nWhen I tried modifying LiveServerThread to use the old WSGIServer, I could no longer reproduce the above error. My changes were as follows:\nclass NonThreadedLiveServerThread(LiveServerThread):\n\tdef _create_server(self):\n\t\treturn WSGIServer((self.host, self.port), QuietWSGIRequestHandler, allow_reuse_address=False)\nclass MyTest(LiveServerTestCase):\n\tserver_thread_class = NonThreadedLiveServerThread\nThe CPython docs ​describe ThreadingMixIn as defining an attribute \"which indicates whether or not the server should wait for thread termination.\"\nConsistent with what I described above, Aymeric said the following on ticket #20238, seeming to foreshadow issues like this one:\nmore threading will certainly create more race conditions on shutdown, especially when it comes to the database connections — it's taken months to eliminate most from LiveServerTestCase, and I'm sure there are still some left,\n\n</pr_description>\n\n<instructions>\n# Task Instructions\n\n## Overview\n\nYou're a software engineer interacting continuously with a computer by submitting commands.\nYou'll be helping implement necessary changes to meet requirements in the PR description.\nYour task is specifically to make changes to non-test files in the current directory in order to fix the issue described in the PR description in a way that is general and consistent with the codebase.\n<IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command, see the result, then think and issue your next command(s).</important>\n\nFor each response:\n\n1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish\n2. Provide one or more bash tool calls to execute\n\n## Important Boundaries\n\n- MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)\n- DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)\n\n## Recommended Workflow\n\n1. Analyze the codebase by finding and reading relevant files\n2. Create a script to reproduce the issue\n3. Edit the source code to resolve the issue\n4. Verify your fix works by running your script again\n5. Test edge cases to ensure your fix is robust\n\n## Command Execution Rules\n\nYou are operating in an environment where\n\n1. You issue at least one command\n2. The system executes the command(s) in a subshell\n3. You see the result(s)\n4. You write your next command(s)\n\nEach response should include:\n\n1. **Reasoning text** where you explain your analysis and plan\n2. At least one tool call with your command\n\n**CRITICAL REQUIREMENTS:**\n\n- Your response SHOULD include reasoning text explaining what you're doing\n- Your response MUST include AT LEAST ONE bash tool call. You can make MULTIPLE tool calls in a single response when the commands are independent (e.g., searching multiple files, reading different parts of the codebase).\n- Directory or environment variable changes are not persistent. Every action is executed in a new subshell.\n- However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files\n\nExample of a CORRECT response:\n<example_response>\nI need to understand the Builder-related code. Let me find relevant files and check the project structure.\n\n[Makes multiple bash tool calls: {\"command\": \"ls -la\"}, {\"command\": \"find src -name '*.java' | grep -i builder\"}, {\"command\": \"cat README.md | head -50\"}]\n</example_response>\n\n## Environment Details\n\n- You have a full Linux shell environment\n- Always use non-interactive flags (-y, -f) for commands\n- Avoid interactive tools like vi, nano, or any that require user input\n- You can use bash commands or invoke any tool that is available in the environment\n- You can also create new tools or scripts to help you with the task\n- If a tool isn't available, you can also install it\n\n## Submission\n\nWhen you've completed your work, you MUST submit your changes as a git patch.\nFollow these steps IN ORDER, with SEPARATE commands:\n\nStep 1: Create the patch file\nRun `git diff -- path/to/file1 path/to/file2 > patch.txt` listing only the source files you modified.\nDo NOT commit your changes.\n\n<IMPORTANT>\nThe patch must only contain changes to the specific source files you modified to fix the issue.\nDo not submit file creations or changes to any of the following files:\n\n- test and reproduction files\n- helper scripts, tests, or tools that you created\n- installation, build, packaging, configuration, or setup scripts unless they are directly part of the issue you were fixing (you can assume that the environment is already set up for your client)\n- binary or compiled files\n</IMPORTANT>\n\nStep 2: Verify your patch\nInspect patch.txt to confirm it only contains your intended changes and headers show `--- a/` and `+++ b/` paths.\n\nStep 3: Submit (EXACT command required)\nYou MUST use this EXACT command to submit:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt\n```\n\nIf the command fails (nonzero exit status), it will not submit.\n\n<CRITICAL>\n- Creating/viewing the patch and submitting it MUST be separate commands (not combined with &&).\n- If you modify patch.txt after verifying, you SHOULD verify again before submitting.\n- You CANNOT continue working (reading, editing, testing) in any way on this task after submitting.\n</CRITICAL>\n</instructions>"
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-08-31T23:21:19.032127+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will search for `ThreadedWSGIServer` in the codebase to find where it is defined and how it is used.",
+      "reasoning_content": "I will search for `ThreadedWSGIServer` in the codebase to find where it is defined and how it is used.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1781219",
+          "function_name": "bash",
+          "arguments": {
+            "command": "find . -name \"*.py\" | xargs grep -n \"ThreadedWSGIServer\""
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n./django/core/servers/basehttp.py:80:class ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n./django/test/testcases.py:33:from django.core.servers.basehttp import ThreadedWSGIServer, WSGIRequestHandler\n./django/test/testcases.py:1479:    server_class = ThreadedWSGIServer\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 1555,
+        "completion_tokens": 59,
+        "extra": {
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 277,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 4,
+      "timestamp": "2026-08-31T23:21:20.702950+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will display the context around `ThreadedWSGIServer` in `django/core/servers/basehttp.py` and `django/test/testcases.py`.",
+      "reasoning_content": "I will display the context around `ThreadedWSGIServer` in `django/core/servers/basehttp.py` and `django/test/testcases.py`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1639233",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '70,95p' django/core/servers/basehttp.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n        self.allow_reuse_address = allow_reuse_address\n        super().__init__(*args, **kwargs)\n\n    def handle_error(self, request, client_address):\n        if is_broken_pipe_error():\n            logger.info(\"- Broken pipe from %s\\n\", client_address)\n        else:\n            super().handle_error(request, client_address)\n\n\nclass ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n    \"\"\"A threaded version of the WSGIServer\"\"\"\n    daemon_threads = True\n\n\nclass ServerHandler(simple_server.ServerHandler):\n    http_version = '1.1'\n\n    def __init__(self, stdin, stdout, stderr, environ, **kwargs):\n        \"\"\"\n        Use a LimitedStream so that unread request data will be ignored at\n        the end of the request. WSGIRequest uses a LimitedStream but it\n        shouldn't discard the data since the upstream servers usually do this.\n        This fix applies only for testserver/runserver.\n        \"\"\"\n        try:\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 2000,
+        "completion_tokens": 71,
+        "extra": {
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 43,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 5,
+      "timestamp": "2026-08-31T23:21:22.213145+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will display the context around line 1479 in `django/test/testcases.py`.",
+      "reasoning_content": "I will display the context around line 1479 in `django/test/testcases.py`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1727208",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '1460,1505p' django/test/testcases.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n    def get_base_url(self):\n        return settings.STATIC_URL\n\n\nclass _MediaFilesHandler(FSFilesHandler):\n    \"\"\"\n    Handler for serving the media files. A private class that is meant to be\n    used solely as a convenience by LiveServerThread.\n    \"\"\"\n    def get_base_dir(self):\n        return settings.MEDIA_ROOT\n\n    def get_base_url(self):\n        return settings.MEDIA_URL\n\n\nclass LiveServerThread(threading.Thread):\n    \"\"\"Thread for running a live http server while the tests are running.\"\"\"\n\n    server_class = ThreadedWSGIServer\n\n    def __init__(self, host, static_handler, connections_override=None, port=0):\n        self.host = host\n        self.port = port\n        self.is_ready = threading.Event()\n        self.error = None\n        self.static_handler = static_handler\n        self.connections_override = connections_override\n        super().__init__()\n\n    def run(self):\n        \"\"\"\n        Set up the live server and databases, and then loop over handling\n        HTTP requests.\n        \"\"\"\n        if self.connections_override:\n            # Override this thread's database connections with the ones\n            # provided by the main thread.\n            for alias, conn in self.connections_override.items():\n                connections[alias] = conn\n        try:\n            # Create the handler for serving static and media files\n            handler = self.static_handler(_MediaFilesHandler(WSGIHandler()))\n            self.httpd = self._create_server()\n            # If binding to port zero, assign the port allocated by the OS.\n            if self.port == 0:\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 2372,
+        "completion_tokens": 59,
+        "extra": {
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 46,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 6,
+      "timestamp": "2026-08-31T23:21:23.677062+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print the rest of `LiveServerThread` definition.",
+      "reasoning_content": "I will print the rest of `LiveServerThread` definition.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1681070",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '1506,1550p' django/test/testcases.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n                self.port = self.httpd.server_address[1]\n            self.httpd.set_app(handler)\n            self.is_ready.set()\n            self.httpd.serve_forever()\n        except Exception as e:\n            self.error = e\n            self.is_ready.set()\n        finally:\n            connections.close_all()\n\n    def _create_server(self):\n        return self.server_class(\n            (self.host, self.port),\n            QuietWSGIRequestHandler,\n            allow_reuse_address=False,\n        )\n\n    def terminate(self):\n        if hasattr(self, 'httpd'):\n            # Stop the WSGI server\n            self.httpd.shutdown()\n            self.httpd.server_close()\n        self.join()\n\n\nclass LiveServerTestCase(TransactionTestCase):\n    \"\"\"\n    Do basically the same as TransactionTestCase but also launch a live HTTP\n    server in a separate thread so that the tests may use another testing\n    framework, such as Selenium for example, instead of the built-in dummy\n    client.\n    It inherits from TransactionTestCase instead of TestCase because the\n    threads don't share the same transactions (unless if using in-memory sqlite)\n    and each thread needs to commit all their transactions so that the other\n    thread can see the changes.\n    \"\"\"\n    host = 'localhost'\n    port = 0\n    server_thread_class = LiveServerThread\n    static_handler = _StaticFilesHandler\n\n    @classproperty\n    def live_server_url(cls):\n        return 'http://%s:%s' % (cls.host, cls.server_thread.port)\n\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 2879,
+        "completion_tokens": 49,
+        "extra": {
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 69,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 7,
+      "timestamp": "2026-08-31T23:21:25.736799+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will search the git log for issue 22414 to understand how it was previously fixed in Django.",
+      "reasoning_content": "I will search the git log for issue 22414 to understand how it was previously fixed in Django.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1781265",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git log --grep=\"22414\""
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ncommit f6cd669ff203192c29495174e53da6b16883b039\nAuthor: Chris Jerdonek <chris.jerdonek@gmail.com>\nDate:   Fri Aug 19 09:47:41 2016 -0700\n\n    Fixed #22414 -- Ensured that LiveServerTestCase closes connections.\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 3397,
+        "completion_tokens": 48,
+        "extra": {
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 215,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 8,
+      "timestamp": "2026-08-31T23:21:27.462206+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will show the changes introduced in commit f6cd669ff203192c29495174e53da6b16883b039.",
+      "reasoning_content": "I will show the changes introduced in commit f6cd669ff203192c29495174e53da6b16883b039.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_292552",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git show f6cd669ff203192c29495174e53da6b16883b039"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ncommit f6cd669ff203192c29495174e53da6b16883b039\nAuthor: Chris Jerdonek <chris.jerdonek@gmail.com>\nDate:   Fri Aug 19 09:47:41 2016 -0700\n\n    Fixed #22414 -- Ensured that LiveServerTestCase closes connections.\n\ndiff --git a/django/test/testcases.py b/django/test/testcases.py\nindex 399c8adf57..8fd84b1423 100644\n--- a/django/test/testcases.py\n+++ b/django/test/testcases.py\n@@ -1262,6 +1262,8 @@ class LiveServerThread(threading.Thread):\n         except Exception as e:\n             self.error = e\n             self.is_ready.set()\n+        finally:\n+            connections.close_all()\n \n     def _create_server(self, port):\n         return WSGIServer((self.host, port), QuietWSGIRequestHandler, allow_reuse_address=False)\n@@ -1271,6 +1273,7 @@ class LiveServerThread(threading.Thread):\n             # Stop the WSGI server\n             self.httpd.shutdown()\n             self.httpd.server_close()\n+        self.join()\n \n \n class LiveServerTestCase(TransactionTestCase):\n@@ -1335,7 +1338,6 @@ class LiveServerTestCase(TransactionTestCase):\n         if hasattr(cls, 'server_thread'):\n             # Terminate the live server's thread\n             cls.server_thread.terminate()\n-            cls.server_thread.join()\n \n         # Restore sqlite in-memory database connections' non-shareability\n         for conn in connections.all():\ndiff --git a/tests/servers/test_liveserverthread.py b/tests/servers/test_liveserverthread.py\nnew file mode 100644\nindex 0000000000..d39aac8183\n--- /dev/null\n+++ b/tests/servers/test_liveserverthread.py\n@@ -0,0 +1,28 @@\n+from django.db import DEFAULT_DB_ALIAS, connections\n+from django.test import LiveServerTestCase, TestCase\n+\n+\n+class LiveServerThreadTest(TestCase):\n+\n+    def run_live_server_thread(self, connections_override=None):\n+        thread = LiveServerTestCase._create_server_thread(connections_override)\n+        thread.daemon = True\n+        thread.start()\n+        thread.is_ready.wait()\n+        thread.terminate()\n+\n+    def test_closes_connections(self):\n+        conn = connections[DEFAULT_DB_ALIAS]\n+        if conn.vendor == 'sqlite' and conn.is_in_memory_db():\n+            self.skipTest(\"the sqlite backend's close() method is a no-op when using an in-memory database\")\n+        # Pass a connection to the thread to check they are being closed.\n+        connections_override = {DEFAULT_DB_ALIAS: conn}\n+\n+        saved_sharing = conn.allow_thread_sharing\n+        try:\n+            conn.allow_thread_sharing = True\n+            self.assertTrue(conn.is_usable())\n+            self.run_live_server_thread(connections_override)\n+            self.assertFalse(conn.is_usable())\n+        finally:\n+            conn.allow_thread_sharing = saved_sharing\ndiff --git a/tests/servers/tests.py b/tests/servers/tests.py\nindex aeddf86f62..3d959b4b23 100644\n--- a/tests/servers/tests.py\n+++ b/tests/servers/tests.py\n@@ -153,4 +153,5 @@ class LiveServerPort(LiveServerBase):\n                 \"Acquired duplicate server addresses for server threads: %s\" % self.live_server_url\n             )\n         finally:\n-            TestCase.tearDownClass()\n+            if hasattr(TestCase, 'server_thread'):\n+                TestCase.server_thread.terminate()\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 3780,
+        "completion_tokens": 98,
+        "extra": {
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 56,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 9,
+      "timestamp": "2026-08-31T23:21:34.181951+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will inspect `socketserver.ThreadingMixIn` using python to see what attributes and methods it has related to waiting for thread termination.",
+      "reasoning_content": "I will inspect `socketserver.ThreadingMixIn` using python to see what attributes and methods it has related to waiting for thread termination.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1539034",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python -c \"import socketserver; import inspect; print(inspect.getsource(socketserver.ThreadingMixIn))\""
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nclass ThreadingMixIn:\n    \"\"\"Mix-in class to handle each request in a new thread.\"\"\"\n\n    # Decides how threads will act upon termination of the\n    # main process\n    daemon_threads = False\n    # If true, server_close() waits until all non-daemonic threads terminate.\n    block_on_close = True\n    # Threads object\n    # used by server_close() to wait for all threads completion.\n    _threads = _NoThreads()\n\n    def process_request_thread(self, request, client_address):\n        \"\"\"Same as in BaseServer but as a thread.\n\n        In addition, exception handling is done here.\n\n        \"\"\"\n        try:\n            self.finish_request(request, client_address)\n        except Exception:\n            self.handle_error(request, client_address)\n        finally:\n            self.shutdown_request(request)\n\n    def process_request(self, request, client_address):\n        \"\"\"Start a new thread to process the request.\"\"\"\n        if self.block_on_close:\n            vars(self).setdefault('_threads', _Threads())\n        t = threading.Thread(target = self.process_request_thread,\n                             args = (request, client_address))\n        t.daemon = self.daemon_threads\n        self._threads.append(t)\n        t.start()\n\n    def server_close(self):\n        super().server_close()\n        self._threads.join()\n\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 4979,
+        "completion_tokens": 67,
+        "extra": {
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 867,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 10,
+      "timestamp": "2026-08-31T23:21:36.231310+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will inspect the definition of `_Threads` and `_NoThreads` in the `socketserver` module.",
+      "reasoning_content": "I will inspect the definition of `_Threads` and `_NoThreads` in the `socketserver` module.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2450692",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python -c \"import socketserver; import inspect; print(inspect.getsource(socketserver._Threads))\""
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nclass _Threads(list):\n    \"\"\"\n    Joinable list of all non-daemon threads.\n    \"\"\"\n    def append(self, thread):\n        self.reap()\n        if thread.daemon:\n            return\n        super().append(thread)\n\n    def pop_all(self):\n        self[:], result = [], self[:]\n        return result\n\n    def join(self):\n        for thread in self.pop_all():\n            thread.join()\n\n    def reap(self):\n        self[:] = (thread for thread in self if thread.is_alive())\n\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 6263,
+        "completion_tokens": 61,
+        "cached_tokens": 3957,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 3957
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 161,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 11,
+      "timestamp": "2026-08-31T23:21:38.888390+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will search git history for references to `ThreadedWSGIServer` or `daemon_threads` to understand the history of this setting.",
+      "reasoning_content": "I will search git history for references to `ThreadedWSGIServer` or `daemon_threads` to understand the history of this setting.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2846890",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git log -S \"daemon_threads\" --oneline"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n934acf1126 Fixed keep-alive support in manage.py runserver.\n4f72e5f03a Fixed #21773 -- made daemon threads default in the development server.\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 6632,
+        "completion_tokens": 54,
+        "cached_tokens": 5927,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 5927
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 298,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 12,
+      "timestamp": "2026-08-31T23:21:46.647967+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will show the changes in commit 4f72e5f03a.",
+      "reasoning_content": "I will show the changes in commit 4f72e5f03a.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2058279",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git show 4f72e5f03a"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ncommit 4f72e5f03ae803fd9faa1445245c1050ca004526\nAuthor: Moayad Mardini <moayad.m@gmail.com>\nDate:   Tue May 20 16:27:12 2014 +0300\n\n    Fixed #21773 -- made daemon threads default in the development server.\n    \n    Thanks clime for the report.\n\ndiff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py\nindex 8b03e9bb4d..f93b3a3143 100644\n--- a/django/core/servers/basehttp.py\n+++ b/django/core/servers/basehttp.py\n@@ -115,5 +115,13 @@ def run(addr, port, wsgi_handler, ipv6=False, threading=False):\n     else:\n         httpd_cls = WSGIServer\n     httpd = httpd_cls(server_address, WSGIRequestHandler, ipv6=ipv6)\n+    if threading:\n+        # ThreadingMixIn.daemon_threads indicates how threads will behave on an\n+        # abrupt shutdown; like quitting the server by the user or restarting\n+        # by the auto-reloader. True means the server will not wait for thread\n+        # termination before it quits. This will make auto-reloader faster\n+        # and will prevent the need to kill the server manually if a thread\n+        # isn't terminating correctly.\n+        httpd.daemon_threads = True\n     httpd.set_app(wsgi_handler)\n     httpd.serve_forever()\ndiff --git a/docs/releases/1.8.txt b/docs/releases/1.8.txt\nindex 30a5ab2239..087098b4ba 100644\n--- a/docs/releases/1.8.txt\n+++ b/docs/releases/1.8.txt\n@@ -165,6 +165,8 @@ Management Commands\n * The :djadminopt:`--ignorenonexistent` option of the :djadmin:`loaddata`\n   management command now ignores data for models that no longer exist.\n \n+* :djadmin:`runserver` now uses daemon threads for faster reloading.\n+\n Models\n ^^^^^^\n \n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 7049,
+        "completion_tokens": 45,
+        "extra": {
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 17,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 13,
+      "timestamp": "2026-08-31T23:21:48.339700+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will find the git commits that introduced or modified `ThreadedWSGIServer`.",
+      "reasoning_content": "I will find the git commits that introduced or modified `ThreadedWSGIServer`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1735062",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git log -S \"ThreadedWSGIServer\" --oneline"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nbece837829 Fixed #20238 -- Added threading support to LiveServerTestCase.\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 7705,
+        "completion_tokens": 44,
+        "cached_tokens": 5924,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 5924
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 49,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 14,
+      "timestamp": "2026-08-31T23:21:55.932930+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will view commit bece837829 to see why and how `ThreadedWSGIServer` was introduced.",
+      "reasoning_content": "I will view commit bece837829 to see why and how `ThreadedWSGIServer` was introduced.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1530900",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git show bece837829"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ncommit bece837829eafbc22f2598dadf82c9a8364b085a\nAuthor: Nadège Michel <michel.nadege@gmail.com>\nDate:   Tue Dec 6 20:38:43 2016 +0100\n\n    Fixed #20238 -- Added threading support to LiveServerTestCase.\n\ndiff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py\nindex 68ef2a74b7..5c281b9c24 100644\n--- a/django/core/servers/basehttp.py\n+++ b/django/core/servers/basehttp.py\n@@ -77,6 +77,11 @@ class WSGIServer(simple_server.WSGIServer):\n             super().handle_error(request, client_address)\n \n \n+class ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n+    \"\"\"A threaded version of the WSGIServer\"\"\"\n+    pass\n+\n+\n class ServerHandler(simple_server.ServerHandler):\n     def handle_error(self):\n         # Ignore broken pipe errors, otherwise pass on\ndiff --git a/django/test/testcases.py b/django/test/testcases.py\nindex 0f879d4222..7955488f48 100644\n--- a/django/test/testcases.py\n+++ b/django/test/testcases.py\n@@ -21,7 +21,7 @@ from django.core.handlers.wsgi import WSGIHandler, get_path_info\n from django.core.management import call_command\n from django.core.management.color import no_style\n from django.core.management.sql import emit_post_migrate_signal\n-from django.core.servers.basehttp import WSGIRequestHandler, WSGIServer\n+from django.core.servers.basehttp import ThreadedWSGIServer, WSGIRequestHandler\n from django.db import DEFAULT_DB_ALIAS, connection, connections, transaction\n from django.forms.fields import CharField\n from django.http import QueryDict\n@@ -1248,7 +1248,7 @@ class LiveServerThread(threading.Thread):\n             connections.close_all()\n \n     def _create_server(self, port):\n-        return WSGIServer((self.host, port), QuietWSGIRequestHandler, allow_reuse_address=False)\n+        return ThreadedWSGIServer((self.host, port), QuietWSGIRequestHandler, allow_reuse_address=False)\n \n     def terminate(self):\n         if hasattr(self, 'httpd'):\ndiff --git a/docs/releases/2.0.txt b/docs/releases/2.0.txt\nindex 6b775bec80..818a8ada87 100644\n--- a/docs/releases/2.0.txt\n+++ b/docs/releases/2.0.txt\n@@ -193,7 +193,7 @@ Templates\n Tests\n ~~~~~\n \n-* ...\n+* Added threading support to :class:`~django.test.LiveServerTestCase`.\n \n URLs\n ~~~~\ndiff --git a/tests/servers/tests.py b/tests/servers/tests.py\nindex 5052f57908..b114b968df 100644\n--- a/tests/servers/tests.py\n+++ b/tests/servers/tests.py\n@@ -130,3 +130,19 @@ class LiveServerPort(LiveServerBase):\n         finally:\n             if hasattr(TestCase, 'server_thread'):\n                 TestCase.server_thread.terminate()\n+\n+\n+class LiverServerThreadedTests(LiveServerBase):\n+    \"\"\"If LiverServerTestCase isn't threaded, these tests will hang.\"\"\"\n+\n+    def test_view_calls_subview(self):\n+        url = '/subview_calling_view/?%s' % urlencode({'url': self.live_server_url})\n+        with self.urlopen(url) as f:\n+            self.assertEqual(f.read(), b'subview calling view: subview')\n+\n+    def test_check_model_instance_from_subview(self):\n+        url = '/check_model_instance_from_subview/?%s' % urlencode({\n+            'url': self.live_server_url,\n+        })\n+        with self.urlopen(url) as f:\n+            self.assertIn(b'emily', f.read())\ndiff --git a/tests/servers/urls.py b/tests/servers/urls.py\nindex 868ecc34f9..4963bde357 100644\n--- a/tests/servers/urls.py\n+++ b/tests/servers/urls.py\n@@ -7,4 +7,7 @@ urlpatterns = [\n     url(r'^model_view/$', views.model_view),\n     url(r'^create_model_instance/$', views.create_model_instance),\n     url(r'^environ_view/$', views.environ_view),\n+    url(r'^subview_calling_view/$', views.subview_calling_view),\n+    url(r'^subview/$', views.subview),\n+    url(r'^check_model_instance_from_subview/$', views.check_model_instance_from_subview),\n ]\ndiff --git a/tests/servers/views.py b/tests/servers/views.py\nindex f1fb8714c5..3fa99380b1 100644\n--- a/tests/servers/views.py\n+++ b/tests/servers/views.py\n@@ -1,3 +1,5 @@\n+from urllib.request import urlopen\n+\n from django.http import HttpResponse\n \n from .models import Person\n@@ -20,3 +22,18 @@ def create_model_instance(request):\n \n def environ_view(request):\n     return HttpResponse(\"\\n\".join(\"%s: %r\" % (k, v) for k, v in request.environ.items()))\n+\n+\n+def subview(request):\n+    return HttpResponse('subview')\n+\n+\n+def subview_calling_view(request):\n+    response = urlopen(request.GET['url'] + '/subview/')\n+    return HttpResponse('subview calling view: {}'.format(response.read().decode()))\n+\n+\n+def check_model_instance_from_subview(request):\n+    urlopen(request.GET['url'] + '/create_model_instance/')\n+    response = urlopen(request.GET['url'] + '/model_view/')\n+    return HttpResponse('subview calling view: {}'.format(response.read().decode()))\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 7839,
+        "completion_tokens": 50,
+        "extra": {
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 14,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 15,
+      "timestamp": "2026-08-31T23:21:57.992944+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will check the git history of `django/core/servers/basehttp.py` specifically for `daemon_threads = True` inside `ThreadedWSGIServer`.",
+      "reasoning_content": "I will check the git history of `django/core/servers/basehttp.py` specifically for `daemon_threads = True` inside `ThreadedWSGIServer`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2503495",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git log -S \"daemon_threads = True\" --oneline"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n934acf1126 Fixed keep-alive support in manage.py runserver.\n4f72e5f03a Fixed #21773 -- made daemon threads default in the development server.\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 9579,
+        "completion_tokens": 63,
+        "cached_tokens": 5939,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 5939
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 127,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 16,
+      "timestamp": "2026-08-31T23:22:05.817107+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will view commit 934acf1126 to see what changes were made regarding `daemon_threads`.",
+      "reasoning_content": "I will view commit 934acf1126 to see what changes were made regarding `daemon_threads`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2325498",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git show 934acf1126"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ncommit 934acf1126995f6e6ccba5947ec8f7561633c27f\nAuthor: Florian Apolloner <florian@apolloner.eu>\nDate:   Sun Nov 4 19:03:20 2018 +0100\n\n    Fixed keep-alive support in manage.py runserver.\n    \n    Ticket #25619 changed the default protocol to HTTP/1.1 but did not\n    properly implement keep-alive. As a \"fix\" keep-alive was disabled in\n    ticket #28440 to prevent clients from hanging (they expect the server to\n    send more data if the connection is not closed and there is no content\n    length set).\n    \n    The combination of those two fixes resulted in yet another problem:\n    HTTP/1.1 by default allows a client to assume that keep-alive is\n    supported unless the server disables it via 'Connection: close' -- see\n    RFC2616 8.1.2.1 for details on persistent connection negotiation. Now if\n    the client receives a response from Django without 'Connection: close'\n    and immediately sends a new request (on the same tcp connection) before\n    our server closes the tcp connection, it will error out at some point\n    because the connection does get closed a few milli seconds later.\n    \n    This patch fixes the mentioned issues by always sending 'Connection:\n    close' if we cannot determine a content length. The code is inefficient\n    in the sense that it does not allow for persistent connections when\n    chunked responses are used, but that should not really cause any\n    problems (Django does not generate those) and it only affects the\n    development server anyways.\n    \n    Refs #25619, #28440.\n\ndiff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py\nindex 89306683b8..8a36b67eef 100644\n--- a/django/core/servers/basehttp.py\n+++ b/django/core/servers/basehttp.py\n@@ -74,12 +74,24 @@ class WSGIServer(simple_server.WSGIServer):\n \n class ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n     \"\"\"A threaded version of the WSGIServer\"\"\"\n-    pass\n+    daemon_threads = True\n \n \n class ServerHandler(simple_server.ServerHandler):\n     http_version = '1.1'\n \n+    def cleanup_headers(self):\n+        super().cleanup_headers()\n+        # HTTP/1.1 requires us to support persistent connections, so\n+        # explicitly send close if we do not know the content length to\n+        # prevent clients from reusing the connection.\n+        if 'Content-Length' not in self.headers:\n+            self.headers['Connection'] = 'close'\n+        # Mark the connection for closing if we set it as such above or\n+        # if the application sent the header.\n+        if self.headers.get('Connection') == 'close':\n+            self.request_handler.close_connection = True\n+\n     def handle_error(self):\n         # Ignore broken pipe errors, otherwise pass on\n         if not is_broken_pipe_error():\n@@ -135,6 +147,16 @@ class WSGIRequestHandler(simple_server.WSGIRequestHandler):\n         return super().get_environ()\n \n     def handle(self):\n+        self.close_connection = True\n+        self.handle_one_request()\n+        while not self.close_connection:\n+            self.handle_one_request()\n+        try:\n+            self.connection.shutdown(socket.SHUT_WR)\n+        except (socket.error, AttributeError):\n+            pass\n+\n+    def handle_one_request(self):\n         \"\"\"Copy of WSGIRequestHandler.handle() but with different ServerHandler\"\"\"\n         self.raw_requestline = self.rfile.readline(65537)\n         if len(self.raw_requestline) > 65536:\n@@ -150,7 +172,7 @@ class WSGIRequestHandler(simple_server.WSGIRequestHandler):\n         handler = ServerHandler(\n             self.rfile, self.wfile, self.get_stderr(), self.get_environ()\n         )\n-        handler.request_handler = self      # backpointer for logging\n+        handler.request_handler = self      # backpointer for logging & connection closing\n         handler.run(self.server.get_app())\n \n \ndiff --git a/tests/servers/tests.py b/tests/servers/tests.py\nindex ce08eb4a3f..e38cb5eb07 100644\n--- a/tests/servers/tests.py\n+++ b/tests/servers/tests.py\n@@ -4,8 +4,7 @@ Tests for django.core.servers.\n import errno\n import os\n import socket\n-import sys\n-from http.client import HTTPConnection, RemoteDisconnected\n+from http.client import HTTPConnection\n from urllib.error import HTTPError\n from urllib.parse import urlencode\n from urllib.request import urlopen\n@@ -57,29 +56,60 @@ class LiveServerViews(LiveServerBase):\n         with self.urlopen('/example_view/') as f:\n             self.assertEqual(f.version, 11)\n \n-    @override_settings(MIDDLEWARE=[])\n     def test_closes_connection_without_content_length(self):\n         \"\"\"\n-        The server doesn't support keep-alive because Python's http.server\n-        module that it uses hangs if a Content-Length header isn't set (for\n-        example, if CommonMiddleware isn't enabled or if the response is a\n-        StreamingHttpResponse) (#28440 / https://bugs.python.org/issue31076).\n+        A HTTP 1.1 server is supposed to support keep-alive. Since our\n+        development server is rather simple we support it only in cases where\n+        we can detect a content length from the response. This should be doable\n+        for all simple views and streaming responses where an iterable with\n+        length of one is passed. The latter follows as result of `set_content_length`\n+        from https://github.com/python/cpython/blob/master/Lib/wsgiref/handlers.py.\n+\n+        If we cannot detect a content length we explicitly set the `Connection`\n+        header to `close` to notify the client that we do not actually support\n+        it.\n         \"\"\"\n         conn = HTTPConnection(LiveServerViews.server_thread.host, LiveServerViews.server_thread.port, timeout=1)\n         try:\n-            conn.request('GET', '/example_view/', headers={'Connection': 'keep-alive'})\n-            response = conn.getresponse().read()\n-            conn.request('GET', '/example_view/', headers={'Connection': 'close'})\n-            # macOS may give ConnectionResetError.\n-            with self.assertRaises((RemoteDisconnected, ConnectionResetError)):\n-                try:\n-                    conn.getresponse()\n-                except ConnectionAbortedError:\n-                    if sys.platform == 'win32':\n-                        self.skipTest('Ignore nondeterministic failure on Windows.')\n+            conn.request('GET', '/streaming_example_view/', headers={'Connection': 'keep-alive'})\n+            response = conn.getresponse()\n+            self.assertTrue(response.will_close)\n+            self.assertEqual(response.read(), b'Iamastream')\n+            self.assertEqual(response.status, 200)\n+            self.assertEqual(response.getheader('Connection'), 'close')\n+\n+            conn.request('GET', '/streaming_example_view/', headers={'Connection': 'close'})\n+            response = conn.getresponse()\n+            self.assertTrue(response.will_close)\n+            self.assertEqual(response.read(), b'Iamastream')\n+            self.assertEqual(response.status, 200)\n+            self.assertEqual(response.getheader('Connection'), 'close')\n+        finally:\n+            conn.close()\n+\n+    def test_keep_alive_on_connection_with_content_length(self):\n+        \"\"\"\n+        See `test_closes_connection_without_content_length` for details. This\n+        is a follow up test, which ensure that we do not close the connection\n+        if not needed, hence allowing us to take advantage of keep-alive.\n+        \"\"\"\n+        conn = HTTPConnection(LiveServerViews.server_thread.host, LiveServerViews.server_thread.port)\n+        try:\n+            conn.request('GET', '/example_view/', headers={\"Connection\": \"keep-alive\"})\n+            response = conn.getresponse()\n+            self.assertFalse(response.will_close)\n+            self.assertEqual(response.read(), b'example view')\n+            self.assertEqual(response.status, 200)\n+            self.assertIsNone(response.getheader('Connection'))\n+\n+            conn.request('GET', '/example_view/', headers={\"Connection\": \"close\"})\n+            response = conn.getresponse()\n+            self.assertFalse(response.will_close)\n+            self.assertEqual(response.read(), b'example view')\n+            self.assertEqual(response.status, 200)\n+            self.assertIsNone(response.getheader('Connection'))\n         finally:\n             conn.close()\n-        self.assertEqual(response, b'example view')\n \n     def test_404(self):\n         with self.assertRaises(HTTPError) as err:\ndiff --git a/tests/servers/urls.py b/tests/servers/urls.py\nindex 4963bde357..9017161808 100644\n--- a/tests/servers/urls.py\n+++ b/tests/servers/urls.py\n@@ -4,6 +4,7 @@ from . import views\n \n urlpatterns = [\n     url(r'^example_view/$', views.example_view),\n+    url(r'^streaming_example_view/$', views.streaming_example_view),\n     url(r'^model_view/$', views.model_view),\n     url(r'^create_model_instance/$', views.create_model_instance),\n     url(r'^environ_view/$', views.environ_view),\ndiff --git a/tests/servers/views.py b/tests/servers/views.py\nindex 3bae0834ab..078be67f46 100644\n--- a/tests/servers/views.py\n+++ b/tests/servers/views.py\n@@ -1,6 +1,6 @@\n from urllib.request import urlopen\n \n-from django.http import HttpResponse\n+from django.http import HttpResponse, StreamingHttpResponse\n \n from .models import Person\n \n@@ -9,6 +9,10 @@ def example_view(request):\n     return HttpResponse('example view')\n \n \n+def streaming_example_view(request):\n+    return StreamingHttpResponse((b'I', b'am', b'a', b'stream'))\n+\n+\n def model_view(request):\n     people = Person.objects.all()\n     return HttpResponse('\\n'.join(person.name for person in people))\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 9834,
+        "completion_tokens": 49,
+        "cached_tokens": 7908,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 7908
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 17,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 17,
+      "timestamp": "2026-08-31T23:22:08.604311+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will display the `run` function in `django/core/servers/basehttp.py` to see what server class `runserver` uses.",
+      "reasoning_content": "I will display the `run` function in `django/core/servers/basehttp.py` to see what server class `runserver` uses.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1758063",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '175,205p' django/core/servers/basehttp.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n            self.connection.shutdown(socket.SHUT_WR)\n        except (AttributeError, OSError):\n            pass\n\n    def handle_one_request(self):\n        \"\"\"Copy of WSGIRequestHandler.handle() but with different ServerHandler\"\"\"\n        self.raw_requestline = self.rfile.readline(65537)\n        if len(self.raw_requestline) > 65536:\n            self.requestline = ''\n            self.request_version = ''\n            self.command = ''\n            self.send_error(414)\n            return\n\n        if not self.parse_request():  # An error code has been sent, just exit\n            return\n\n        handler = ServerHandler(\n            self.rfile, self.wfile, self.get_stderr(), self.get_environ()\n        )\n        handler.request_handler = self      # backpointer for logging & connection closing\n        handler.run(self.server.get_app())\n\n\ndef run(addr, port, wsgi_handler, ipv6=False, threading=False, server_cls=WSGIServer):\n    server_address = (addr, port)\n    if threading:\n        httpd_cls = type('WSGIServer', (socketserver.ThreadingMixIn, server_cls), {})\n    else:\n        httpd_cls = server_cls\n    httpd = httpd_cls(server_address, WSGIRequestHandler, ipv6=ipv6)\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 12651,
+        "completion_tokens": 68,
+        "cached_tokens": 7956,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 7956
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 222,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 18,
+      "timestamp": "2026-08-31T23:22:11.237052+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print more lines from `django/core/servers/basehttp.py` to see the end of `run` function.",
+      "reasoning_content": "I will print more lines from `django/core/servers/basehttp.py` to see the end of `run` function.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1980217",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '200,225p' django/core/servers/basehttp.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n    server_address = (addr, port)\n    if threading:\n        httpd_cls = type('WSGIServer', (socketserver.ThreadingMixIn, server_cls), {})\n    else:\n        httpd_cls = server_cls\n    httpd = httpd_cls(server_address, WSGIRequestHandler, ipv6=ipv6)\n    if threading:\n        # ThreadingMixIn.daemon_threads indicates how threads will behave on an\n        # abrupt shutdown; like quitting the server by the user or restarting\n        # by the auto-reloader. True means the server will not wait for thread\n        # termination before it quits. This will make auto-reloader faster\n        # and will prevent the need to kill the server manually if a thread\n        # isn't terminating correctly.\n        httpd.daemon_threads = True\n    httpd.set_app(wsgi_handler)\n    httpd.serve_forever()\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 13293,
+        "completion_tokens": 64,
+        "cached_tokens": 5966,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 5966
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 316,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 19,
+      "timestamp": "2026-08-31T23:22:17.652435+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will search for `close_old_connections` to see how it works and whether it actually closes connections.",
+      "reasoning_content": "I will search for `close_old_connections` to see how it works and whether it actually closes connections.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2078106",
+          "function_name": "bash",
+          "arguments": {
+            "command": "find . -name \"*.py\" | xargs grep -n \"def close_old_connections\""
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n./django/db/__init__.py:36:def close_old_connections(**kwargs):\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 13899,
+        "completion_tokens": 57,
+        "cached_tokens": 11929,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 11929
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 846,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 20,
+      "timestamp": "2026-08-31T23:22:18.964229+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will view the definition of `close_old_connections`.",
+      "reasoning_content": "I will view the definition of `close_old_connections`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2366378",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '36,55p' django/db/__init__.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ndef close_old_connections(**kwargs):\n    for conn in connections.all():\n        conn.close_if_unusable_or_obsolete()\n\n\nsignals.request_started.connect(close_old_connections)\nsignals.request_finished.connect(close_old_connections)\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 14840,
+        "completion_tokens": 44,
+        "cached_tokens": 11934,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 11934
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 13,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 21,
+      "timestamp": "2026-08-31T23:22:21.019451+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will search for the definition of `ConnectionHandler`.",
+      "reasoning_content": "I will search for the definition of `ConnectionHandler`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2405327",
+          "function_name": "bash",
+          "arguments": {
+            "command": "find . -name \"*.py\" | xargs grep -n \"class ConnectionHandler\""
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n./django/db/utils.py:134:class ConnectionHandler(BaseConnectionHandler):\n./tests/db_utils/tests.py:11:class ConnectionHandlerTests(SimpleTestCase):\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 14978,
+        "completion_tokens": 42,
+        "cached_tokens": 13907,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 13907
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 154,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 22,
+      "timestamp": "2026-08-31T23:22:22.394948+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will find the definition of `BaseConnectionHandler`.",
+      "reasoning_content": "I will find the definition of `BaseConnectionHandler`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2334143",
+          "function_name": "bash",
+          "arguments": {
+            "command": "find . -name \"*.py\" | xargs grep -n \"class BaseConnectionHandler\""
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n./django/utils/connection.py:34:class BaseConnectionHandler:\n./tests/utils_tests/test_connection.py:5:class BaseConnectionHandlerTests(SimpleTestCase):\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 15235,
+        "completion_tokens": 43,
+        "cached_tokens": 13894,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 13894
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 19,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 23,
+      "timestamp": "2026-08-31T23:22:23.800315+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print the code for `BaseConnectionHandler` in `django/utils/connection.py`.",
+      "reasoning_content": "I will print the code for `BaseConnectionHandler` in `django/utils/connection.py`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1739874",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '34,70p' django/utils/connection.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nclass BaseConnectionHandler:\n    settings_name = None\n    exception_class = ConnectionDoesNotExist\n    thread_critical = False\n\n    def __init__(self, settings=None):\n        self._settings = settings\n        self._connections = Local(self.thread_critical)\n\n    @cached_property\n    def settings(self):\n        self._settings = self.configure_settings(self._settings)\n        return self._settings\n\n    def configure_settings(self, settings):\n        if settings is None:\n            settings = getattr(django_settings, self.settings_name)\n        return settings\n\n    def create_connection(self, alias):\n        raise NotImplementedError('Subclasses must implement create_connection().')\n\n    def __getitem__(self, alias):\n        try:\n            return getattr(self._connections, alias)\n        except AttributeError:\n            if alias not in self.settings:\n                raise self.exception_class(f\"The connection '{alias}' doesn't exist.\")\n        conn = self.create_connection(alias)\n        setattr(self._connections, alias, conn)\n        return conn\n\n    def __setitem__(self, key, value):\n        setattr(self._connections, key, value)\n\n    def __delitem__(self, key):\n        delattr(self._connections, key)\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 15356,
+        "completion_tokens": 52,
+        "cached_tokens": 13878,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 13878
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 19,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 24,
+      "timestamp": "2026-08-31T23:22:25.432027+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will check where `Local` is imported in `django/utils/connection.py`.",
+      "reasoning_content": "I will check where `Local` is imported in `django/utils/connection.py`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1696608",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '1,15p' django/utils/connection.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nfrom asgiref.local import Local\n\nfrom django.conf import settings as django_settings\nfrom django.utils.functional import cached_property\n\n\nclass ConnectionProxy:\n    \"\"\"Proxy for accessing a connection object's attributes.\"\"\"\n\n    def __init__(self, connections, alias):\n        self.__dict__['_connections'] = connections\n        self.__dict__['_alias'] = alias\n\n    def __getattr__(self, item):\n        return getattr(self._connections[self._alias], item)\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 15741,
+        "completion_tokens": 49,
+        "cached_tokens": 13870,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 13870
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 70,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 25,
+      "timestamp": "2026-08-31T23:22:31.450488+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will search for `close_if_unusable_or_obsolete` definition.",
+      "reasoning_content": "I will search for `close_if_unusable_or_obsolete` definition.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1441433",
+          "function_name": "bash",
+          "arguments": {
+            "command": "find . -name \"*.py\" | xargs grep -n \"def close_if_unusable_or_obsolete\""
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n./django/db/backends/base/base.py:502:    def close_if_unusable_or_obsolete(self):\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 15985,
+        "completion_tokens": 59,
+        "cached_tokens": 11879,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 11879
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 1006,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 26,
+      "timestamp": "2026-08-31T23:22:32.841336+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print the code around line 502 in `django/db/backends/base/base.py`.",
+      "reasoning_content": "I will print the code around line 502 in `django/db/backends/base/base.py`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2456210",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '495,515p' django/db/backends/base/base.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n\n        Actual implementations should take care not to raise exceptions\n        as that may prevent Django from recycling unusable connections.\n        \"\"\"\n        raise NotImplementedError(\n            \"subclasses of BaseDatabaseWrapper may require an is_usable() method\")\n\n    def close_if_unusable_or_obsolete(self):\n        \"\"\"\n        Close the current connection if unrecoverable errors have occurred\n        or if it outlived its maximum age.\n        \"\"\"\n        if self.connection is not None:\n            # If the application didn't restore the original autocommit setting,\n            # don't take chances, drop the connection.\n            if self.get_autocommit() != self.settings_dict['AUTOCOMMIT']:\n                self.close()\n                return\n\n            # If an exception other than DataError or IntegrityError occurred\n            # since the last commit / rollback, check if the connection works.\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 17100,
+        "completion_tokens": 62,
+        "cached_tokens": 13871,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 13871
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 21,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 27,
+      "timestamp": "2026-08-31T23:22:39.664189+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print the imports of `django/core/servers/basehttp.py`.",
+      "reasoning_content": "I will print the imports of `django/core/servers/basehttp.py`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1355904",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '1,30p' django/core/servers/basehttp.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n\"\"\"\nHTTP server that implements the Python WSGI protocol (PEP 333, rev 1.21).\n\nBased on wsgiref.simple_server which is part of the standard library since 2.5.\n\nThis is a simple server for use in testing or debugging Django apps. It hasn't\nbeen reviewed for security issues. DON'T USE IT FOR PRODUCTION USE!\n\"\"\"\n\nimport logging\nimport socket\nimport socketserver\nimport sys\nfrom wsgiref import simple_server\n\nfrom django.core.exceptions import ImproperlyConfigured\nfrom django.core.handlers.wsgi import LimitedStream\nfrom django.core.wsgi import get_wsgi_application\nfrom django.utils.module_loading import import_string\n\n__all__ = ('WSGIServer', 'WSGIRequestHandler')\n\nlogger = logging.getLogger('django.server')\n\n\ndef get_internal_wsgi_application():\n    \"\"\"\n    Load and return the WSGI application as configured by the user in\n    ``settings.WSGI_APPLICATION``. With the default ``startproject`` layout,\n    this will be the ``application`` object in ``projectname/wsgi.py``.\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 17394,
+        "completion_tokens": 51,
+        "cached_tokens": 15842,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 15842
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 1094,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 28,
+      "timestamp": "2026-08-31T23:23:00.028761+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will run the existing tests in `tests/servers/` to see if they pass.",
+      "reasoning_content": "I will run the existing tests in `tests/servers/` to see if they pass.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1687157",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python tests/runtests.py servers"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nTesting against Django installed in '/testbed/django' with up to 64 processes\nCreating test database for alias 'default'...\nSystem check identified no issues (0 silenced).\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\n....s....................\n----------------------------------------------------------------------\nRan 25 tests in 1.587s\n\nOK (skipped=1)\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 18807,
+        "completion_tokens": 40,
+        "cached_tokens": 15864,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 15864
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 3531,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 29,
+      "timestamp": "2026-08-31T23:23:04.483639+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print the contents of `tests/servers/test_liveserverthread.py`.",
+      "reasoning_content": "I will print the contents of `tests/servers/test_liveserverthread.py`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2334583",
+          "function_name": "bash",
+          "arguments": {
+            "command": "cat tests/servers/test_liveserverthread.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nfrom django.db import DEFAULT_DB_ALIAS, connections\nfrom django.test import LiveServerTestCase, TransactionTestCase\nfrom django.test.testcases import LiveServerThread\n\n\n# Use TransactionTestCase instead of TestCase to run outside of a transaction,\n# otherwise closing the connection would implicitly rollback and not set the\n# connection to None.\nclass LiveServerThreadTest(TransactionTestCase):\n\n    available_apps = []\n\n    def run_live_server_thread(self, connections_override=None):\n        thread = LiveServerTestCase._create_server_thread(connections_override)\n        thread.daemon = True\n        thread.start()\n        thread.is_ready.wait()\n        thread.terminate()\n\n    def test_closes_connections(self):\n        conn = connections[DEFAULT_DB_ALIAS]\n        # Pass a connection to the thread to check they are being closed.\n        connections_override = {DEFAULT_DB_ALIAS: conn}\n        # Open a connection to the database.\n        conn.connect()\n        conn.inc_thread_sharing()\n        try:\n            self.assertIsNotNone(conn.connection)\n            self.run_live_server_thread(connections_override)\n            self.assertIsNone(conn.connection)\n        finally:\n            conn.dec_thread_sharing()\n\n    def test_server_class(self):\n        class FakeServer:\n            def __init__(*args, **kwargs):\n                pass\n\n        class MyServerThread(LiveServerThread):\n            server_class = FakeServer\n\n        class MyServerTestCase(LiveServerTestCase):\n            server_thread_class = MyServerThread\n\n        thread = MyServerTestCase._create_server_thread(None)\n        server = thread._create_server()\n        self.assertIs(type(server), FakeServer)\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 22674,
+        "completion_tokens": 44,
+        "cached_tokens": 17927,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 17927
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 73,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 30,
+      "timestamp": "2026-08-31T23:23:07.884047+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will run `test_liveserverthread.py` to see if everything works fine before making any changes.",
+      "reasoning_content": "I will run `test_liveserverthread.py` to see if everything works fine before making any changes.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1241826",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python tests/runtests.py servers.test_liveserverthread"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nCreating test database for alias 'default'...\nTesting against Django installed in '/testbed/django' with up to 64 processes\nSystem check identified no issues (0 silenced).\ns.\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nOK (skipped=1)\nDestroying test database for alias 'default'...\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 23212,
+        "completion_tokens": 50,
+        "cached_tokens": 15931,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 15931
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 369,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 31,
+      "timestamp": "2026-08-31T23:23:11.640941+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will run the tests with verbose output to see which test was skipped and why.",
+      "reasoning_content": "I will run the tests with verbose output to see which test was skipped and why.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2592315",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python tests/runtests.py servers.test_liveserverthread -v 2"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nTesting against Django installed in '/testbed/django' with up to 64 processes\nImporting application servers\nSkipping setup of unused database(s): other.\nOperations to perform:\n  Synchronize unmigrated apps: auth, contenttypes, messages, servers, sessions, staticfiles\n  Apply all migrations: admin, sites\nSynchronizing apps without migrations:\n  Creating tables...\n    Creating table django_content_type\n    Creating table auth_permission\n    Creating table auth_group\n    Creating table auth_user\n    Creating table django_session\n    Creating table servers_person\n    Running deferred SQL...\nRunning migrations:\n  Applying admin.0001_initial... OK\n  Applying admin.0002_logentry_remove_auto_add... OK\n  Applying admin.0003_logentry_add_action_flag_choices... OK\n  Applying sites.0001_initial... OK\n  Applying sites.0002_alter_domain_unique... OK\nCreating test database for alias 'default' ('file:memorydb_default?mode=memory&cache=shared')...\nSystem check identified no issues (0 silenced).\ntest_closes_connections (servers.test_liveserverthread.LiveServerThreadTest) ... skipped \"the sqlite backend's close() method is a no-op when using an in-memory database\"\ntest_server_class (servers.test_liveserverthread.LiveServerThreadTest) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nOK (skipped=1)\nDestroying test database for alias 'default' ('file:memorydb_default?mode=memory&cache=shared')...\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 23724,
+        "completion_tokens": 48,
+        "cached_tokens": 21898,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 21898
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 359,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 32,
+      "timestamp": "2026-08-31T23:23:17.444778+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print lines 75 to 88 of `django/core/servers/basehttp.py` to inspect the exact lines to be modified.",
+      "reasoning_content": "I will print lines 75 to 88 of `django/core/servers/basehttp.py` to inspect the exact lines to be modified.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1712065",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '75,88p' django/core/servers/basehttp.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n            logger.info(\"- Broken pipe from %s\\n\", client_address)\n        else:\n            super().handle_error(request, client_address)\n\n\nclass ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n    \"\"\"A threaded version of the WSGIServer\"\"\"\n    daemon_threads = True\n\n\nclass ServerHandler(simple_server.ServerHandler):\n    http_version = '1.1'\n\n    def __init__(self, stdin, stdout, stderr, environ, **kwargs):\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 24525,
+        "completion_tokens": 67,
+        "cached_tokens": 21899,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 21899
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 791,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 33,
+      "timestamp": "2026-08-31T23:23:20.891018+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will modify `django/core/servers/basehttp.py` using Python to change `daemon_threads` to `False` and implement `process_request_thread` with database connection cleanup.",
+      "reasoning_content": "I will modify `django/core/servers/basehttp.py` using Python to change `daemon_threads` to `False` and implement `process_request_thread` with database connection cleanup.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1391663",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python -c '\nfilepath = \"django/core/servers/basehttp.py\"\nwith open(filepath, \"r\") as f:\n    content = f.read()\n\ntarget = \"\"\"class ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n    \\\"\\\"\\\"A threaded version of the WSGIServer\\\"\\\"\\\"\n    daemon_threads = True\"\"\"\n\nreplacement = \"\"\"class ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n    \\\"\\\"\\\"A threaded version of the WSGIServer\\\"\\\"\\\"\n    daemon_threads = False\n\n    def process_request_thread(self, request, client_address):\n        try:\n            super().process_request_thread(request, client_address)\n        finally:\n            from django.db import connections\n            connections.close_all()\"\"\"\n\nif target in content:\n    content = content.replace(target, replacement)\n    with open(filepath, \"w\") as f:\n        f.write(content)\n    print(\"Success\")\nelse:\n    print(\"Target string not found!\")\n'"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nSuccess\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 25515,
+        "completion_tokens": 302,
+        "cached_tokens": 21904,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 21904
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 254,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 34,
+      "timestamp": "2026-08-31T23:23:22.496252+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will check the git diff of our change to ensure it is clean and correct.",
+      "reasoning_content": "I will check the git diff of our change to ensure it is clean and correct.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_928445",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git diff django/core/servers/basehttp.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ndiff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py\nindex 14dab517c9..c07465de4e 100644\n--- a/django/core/servers/basehttp.py\n+++ b/django/core/servers/basehttp.py\n@@ -79,7 +79,14 @@ class WSGIServer(simple_server.WSGIServer):\n \n class ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n     \"\"\"A threaded version of the WSGIServer\"\"\"\n-    daemon_threads = True\n+    daemon_threads = False\n+\n+    def process_request_thread(self, request, client_address):\n+        try:\n+            super().process_request_thread(request, client_address)\n+        finally:\n+            from django.db import connections\n+            connections.close_all()\n \n \n class ServerHandler(simple_server.ServerHandler):\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 26089,
+        "completion_tokens": 42,
+        "cached_tokens": 23891,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 23891
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 38,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 35,
+      "timestamp": "2026-08-31T23:23:23.890031+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will run the servers tests to see if everything works as expected with our change.",
+      "reasoning_content": "I will run the servers tests to see if everything works as expected with our change.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2451693",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python tests/runtests.py servers"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nCreating test database for alias 'default'...\nTesting against Django installed in '/testbed/django' with up to 64 processes\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nSystem check identified no issues (0 silenced).\n....s....................\n----------------------------------------------------------------------\nRan 25 tests in 1.586s\n\nOK (skipped=1)\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 26426,
+        "completion_tokens": 38,
+        "cached_tokens": 23880,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 23880
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 33,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 36,
+      "timestamp": "2026-08-31T23:23:27.748672+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will check the implementation of `LiveServerThread` again.",
+      "reasoning_content": "I will check the implementation of `LiveServerThread` again.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1750232",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '1475,1530p' django/test/testcases.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n\nclass LiveServerThread(threading.Thread):\n    \"\"\"Thread for running a live http server while the tests are running.\"\"\"\n\n    server_class = ThreadedWSGIServer\n\n    def __init__(self, host, static_handler, connections_override=None, port=0):\n        self.host = host\n        self.port = port\n        self.is_ready = threading.Event()\n        self.error = None\n        self.static_handler = static_handler\n        self.connections_override = connections_override\n        super().__init__()\n\n    def run(self):\n        \"\"\"\n        Set up the live server and databases, and then loop over handling\n        HTTP requests.\n        \"\"\"\n        if self.connections_override:\n            # Override this thread's database connections with the ones\n            # provided by the main thread.\n            for alias, conn in self.connections_override.items():\n                connections[alias] = conn\n        try:\n            # Create the handler for serving static and media files\n            handler = self.static_handler(_MediaFilesHandler(WSGIHandler()))\n            self.httpd = self._create_server()\n            # If binding to port zero, assign the port allocated by the OS.\n            if self.port == 0:\n                self.port = self.httpd.server_address[1]\n            self.httpd.set_app(handler)\n            self.is_ready.set()\n            self.httpd.serve_forever()\n        except Exception as e:\n            self.error = e\n            self.is_ready.set()\n        finally:\n            connections.close_all()\n\n    def _create_server(self):\n        return self.server_class(\n            (self.host, self.port),\n            QuietWSGIRequestHandler,\n            allow_reuse_address=False,\n        )\n\n    def terminate(self):\n        if hasattr(self, 'httpd'):\n            # Stop the WSGI server\n            self.httpd.shutdown()\n            self.httpd.server_close()\n        self.join()\n\n\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 26793,
+        "completion_tokens": 49,
+        "cached_tokens": 25859,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 25859
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 84,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 37,
+      "timestamp": "2026-08-31T23:23:31.171337+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print the `LiveServerTestCase` class implementation to check for any other thread or database-related details.",
+      "reasoning_content": "I will print the `LiveServerTestCase` class implementation to check for any other thread or database-related details.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2126110",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '1531,1575p' django/test/testcases.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nclass LiveServerTestCase(TransactionTestCase):\n    \"\"\"\n    Do basically the same as TransactionTestCase but also launch a live HTTP\n    server in a separate thread so that the tests may use another testing\n    framework, such as Selenium for example, instead of the built-in dummy\n    client.\n    It inherits from TransactionTestCase instead of TestCase because the\n    threads don't share the same transactions (unless if using in-memory sqlite)\n    and each thread needs to commit all their transactions so that the other\n    thread can see the changes.\n    \"\"\"\n    host = 'localhost'\n    port = 0\n    server_thread_class = LiveServerThread\n    static_handler = _StaticFilesHandler\n\n    @classproperty\n    def live_server_url(cls):\n        return 'http://%s:%s' % (cls.host, cls.server_thread.port)\n\n    @classproperty\n    def allowed_host(cls):\n        return cls.host\n\n    @classmethod\n    def setUpClass(cls):\n        super().setUpClass()\n        connections_override = {}\n        for conn in connections.all():\n            # If using in-memory sqlite databases, pass the connections to\n            # the server thread.\n            if conn.vendor == 'sqlite' and conn.is_in_memory_db():\n                # Explicitly enable thread-shareability for this connection\n                conn.inc_thread_sharing()\n                connections_override[conn.alias] = conn\n\n        cls._live_server_modified_settings = modify_settings(\n            ALLOWED_HOSTS={'append': cls.allowed_host},\n        )\n        cls._live_server_modified_settings.enable()\n        cls.server_thread = cls._create_server_thread(connections_override)\n        cls.server_thread.daemon = True\n        cls.server_thread.start()\n\n        # Wait for the live server to be ready\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 27414,
+        "completion_tokens": 59,
+        "cached_tokens": 25856,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 25856
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 430,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 38,
+      "timestamp": "2026-08-31T23:23:32.744947+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print the remaining lines of the `LiveServerTestCase` class to be thorough.",
+      "reasoning_content": "I will print the remaining lines of the `LiveServerTestCase` class to be thorough.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2504300",
+          "function_name": "bash",
+          "arguments": {
+            "command": "sed -n '1576,1610p' django/test/testcases.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n        cls.server_thread.is_ready.wait()\n        if cls.server_thread.error:\n            # Clean up behind ourselves, since tearDownClass won't get called in\n            # case of errors.\n            cls._tearDownClassInternal()\n            raise cls.server_thread.error\n\n    @classmethod\n    def _create_server_thread(cls, connections_override):\n        return cls.server_thread_class(\n            cls.host,\n            cls.static_handler,\n            connections_override=connections_override,\n            port=cls.port,\n        )\n\n    @classmethod\n    def _tearDownClassInternal(cls):\n        # Terminate the live server's thread.\n        cls.server_thread.terminate()\n        # Restore sqlite in-memory database connections' non-shareability.\n        for conn in cls.server_thread.connections_override.values():\n            conn.dec_thread_sharing()\n\n        cls._live_server_modified_settings.disable()\n        super().tearDownClass()\n\n    @classmethod\n    def tearDownClass(cls):\n        cls._tearDownClassInternal()\n\n\nclass SerializeMixin:\n    \"\"\"\n    Enforce serialization of TestCases that share a common resource.\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 28347,
+        "completion_tokens": 54,
+        "cached_tokens": 25861,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 25861
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 16,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 39,
+      "timestamp": "2026-08-31T23:23:34.698764+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will run `git status` to check if there are any other modified files.",
+      "reasoning_content": "I will run `git status` to check if there are any other modified files.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_293563",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git status"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nOn branch main\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n  (use \"git restore <file>...\" to discard changes in working directory)\n\tmodified:   django/core/servers/basehttp.py\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 28714,
+        "completion_tokens": 32,
+        "cached_tokens": 27840,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 27840
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 75,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 40,
+      "timestamp": "2026-08-31T23:23:36.478183+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will run the servers tests again using the test runner to verify everything works properly.",
+      "reasoning_content": "I will run the servers tests again using the test runner to verify everything works properly.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_892475",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python tests/runtests.py servers.tests"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nTesting against Django installed in '/testbed/django' with up to 64 processes\nCreating test database for alias 'default'...\nSystem check identified no issues (0 silenced).\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\n...................\n----------------------------------------------------------------------\nRan 19 tests in 1.582s\n\nOK\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 28920,
+        "completion_tokens": 40,
+        "cached_tokens": 27825,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 27825
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 61,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 41,
+      "timestamp": "2026-08-31T23:23:40.100038+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will search for other tests that reference or use `LiveServerTestCase`.",
+      "reasoning_content": "I will search for other tests that reference or use `LiveServerTestCase`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2450435",
+          "function_name": "bash",
+          "arguments": {
+            "command": "find tests/ -name \"*.py\" | xargs grep -l \"LiveServerTestCase\""
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ntests/admin_scripts/tests.py\ntests/file_storage/tests.py\ntests/servers/test_liveserverthread.py\ntests/servers/tests.py\ntests/staticfiles_tests/test_liveserver.py\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 29250,
+        "completion_tokens": 47,
+        "cached_tokens": 27814,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 27814
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 52,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 42,
+      "timestamp": "2026-08-31T23:23:41.544698+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will run the staticfiles live server tests to make sure they also pass.",
+      "reasoning_content": "I will run the staticfiles live server tests to make sure they also pass.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1750344",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python tests/runtests.py staticfiles_tests.test_liveserver"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nTesting against Django installed in '/testbed/django' with up to 64 processes\nCreating test database for alias 'default'...\nSystem check identified no issues (0 silenced).\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\n..\n----------------------------------------------------------------------\nRan 2 tests in 0.583s\n\nOK\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 29418,
+        "completion_tokens": 46,
+        "cached_tokens": 27798,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 27798
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 27,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 43,
+      "timestamp": "2026-08-31T23:23:44.241305+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will search for `LiveServer` in `tests/file_storage/tests.py`.",
+      "reasoning_content": "I will search for `LiveServer` in `tests/file_storage/tests.py`.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2172970",
+          "function_name": "bash",
+          "arguments": {
+            "command": "grep \"LiveServer\" tests/file_storage/tests.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n    LiveServerTestCase, SimpleTestCase, TestCase, override_settings,\nclass FileLikeObjectTestCase(LiveServerTestCase):\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 29617,
+        "completion_tokens": 47,
+        "cached_tokens": 27784,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 27784
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 60,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 44,
+      "timestamp": "2026-08-31T23:23:45.798281+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will run the file storage tests to ensure they are fully compatible.",
+      "reasoning_content": "I will run the file storage tests to ensure they are fully compatible.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1782087",
+          "function_name": "bash",
+          "arguments": {
+            "command": "python tests/runtests.py file_storage.tests"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\nTesting against Django installed in '/testbed/django' with up to 64 processes\nCreating test database for alias 'default'...\nSystem check identified no issues (0 silenced).\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\nCloning test database for alias 'default'...\n.......................................................................................................................................\n----------------------------------------------------------------------\nRan 135 tests in 1.079s\n\nOK\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\nDestroying test database for alias 'default'...\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 29766,
+        "completion_tokens": 39,
+        "cached_tokens": 27768,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 27768
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 15,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 45,
+      "timestamp": "2026-08-31T23:23:49.764090+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will print the modified lines around `ThreadedWSGIServer` in `django/core/servers/basehttp.py` to verify formatting and correctness.",
+      "reasoning_content": "I will print the modified lines around `ThreadedWSGIServer` in `django/core/servers/basehttp.py` to verify formatting and correctness.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1682133",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git diff django/core/servers/basehttp.py"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ndiff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py\nindex 14dab517c9..c07465de4e 100644\n--- a/django/core/servers/basehttp.py\n+++ b/django/core/servers/basehttp.py\n@@ -79,7 +79,14 @@ class WSGIServer(simple_server.WSGIServer):\n \n class ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n     \"\"\"A threaded version of the WSGIServer\"\"\"\n-    daemon_threads = True\n+    daemon_threads = False\n+\n+    def process_request_thread(self, request, client_address):\n+        try:\n+            super().process_request_thread(request, client_address)\n+        finally:\n+            from django.db import connections\n+            connections.close_all()\n \n \n class ServerHandler(simple_server.ServerHandler):\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 30177,
+        "completion_tokens": 58,
+        "cached_tokens": 29744,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 29744
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 174,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 46,
+      "timestamp": "2026-08-31T23:23:51.825308+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will generate the git patch file.",
+      "reasoning_content": "I will generate the git patch file.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_892666",
+          "function_name": "bash",
+          "arguments": {
+            "command": "git diff -- django/core/servers/basehttp.py > patch.txt"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 30666,
+        "completion_tokens": 38,
+        "cached_tokens": 29738,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 29738
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 148,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 47,
+      "timestamp": "2026-08-31T23:23:53.534275+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will inspect the generated `patch.txt` file to verify its contents.",
+      "reasoning_content": "I will inspect the generated `patch.txt` file to verify its contents.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1927753",
+          "function_name": "bash",
+          "arguments": {
+            "command": "cat patch.txt"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "<returncode>0</returncode>\n<output>\ndiff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py\nindex 14dab517c9..c07465de4e 100644\n--- a/django/core/servers/basehttp.py\n+++ b/django/core/servers/basehttp.py\n@@ -79,7 +79,14 @@ class WSGIServer(simple_server.WSGIServer):\n \n class ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):\n     \"\"\"A threaded version of the WSGIServer\"\"\"\n-    daemon_threads = True\n+    daemon_threads = False\n+\n+    def process_request_thread(self, request, client_address):\n+        try:\n+            super().process_request_thread(request, client_address)\n+        finally:\n+            from django.db import connections\n+            connections.close_all()\n \n \n class ServerHandler(simple_server.ServerHandler):\n</output>"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 30868,
+        "completion_tokens": 33,
+        "cached_tokens": 25761,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 25761
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 53,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 48,
+      "timestamp": "2026-08-31T23:23:55.140542+00:00",
+      "source": "agent",
+      "model_name": "gemini-3-5-flash-fair",
+      "message": "I will now submit the final patch.",
+      "reasoning_content": "I will now submit the final patch.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2251083",
+          "function_name": "bash",
+          "arguments": {
+            "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"
+          }
+        }
+      ],
+      "metrics": {
+        "prompt_tokens": 31211,
+        "completion_tokens": 39,
+        "cached_tokens": 29714,
+        "extra": {
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 29714
+          },
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 80,
+            "rejected_prediction_tokens": null
+          }
+        }
+      },
+      "llm_call_count": 1
+    }
+  ],
+  "notes": "Converted from mini-swe-agent trajectory format to ATIF",
+  "final_metrics": {
+    "total_prompt_tokens": 814468,
+    "total_completion_tokens": 2620,
+    "total_cached_tokens": 687137,
+    "total_steps": 48,
+    "extra": {
+      "total_reasoning_tokens": 12759
+    }
+  }
+}

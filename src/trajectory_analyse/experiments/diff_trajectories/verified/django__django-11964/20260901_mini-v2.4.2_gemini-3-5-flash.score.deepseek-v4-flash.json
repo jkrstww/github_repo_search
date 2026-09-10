@@ -1,0 +1,265 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 12,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 6 (python -c str/type probe)",
+          "observation": "str(MyEnum.FOO)= 'MyEnum.FOO' with type <enum 'MyEnum'>",
+          "impact": "确认了失败机制：mixed-in enum 的 __str__ 返回类名.MEMBER 而不是值；这是问题核心。支持得分。"
+        },
+        {
+          "location": "step 35 (str vs f-string/format probe)",
+          "observation": "str 输出 'MyEnum.FOO'，但 f-string 和 format 输出 'foo'",
+          "impact": "把缺陷精确定位到 __str__，区分于 __format__ 路径。支持得分。"
+        },
+        {
+          "location": "steps 27-28 (override experiment)",
+          "observation": "在 Choices 加 __str__ 后，str(MyChoice.FIRST)='first'/'1'，同时 isinstance/== True",
+          "impact": "验证提议的验收行为对 TextChoices/IntegerChoices 均成立。但未在模型/ORM 层复现 PR 场景，或给出非目标清单。扣部分分。"
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 12,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 22-26 (fields/base reads)",
+          "observation": "阅读 CharField/IntegerField 的 to_python/get_prep_value、DeferredAttribute 和 Model.__init__ 的 setattr 路径",
+          "impact": "理解了创建实例时值原样存进 __dict__（type 为 enum），而数据库回读会经 to_python 转成基础 str/int；这是 created vs retrieved 类型不同的因果链。支持得分。"
+        },
+        {
+          "location": "step 6 (direct repro)",
+          "observation": "用纯 Python 复现 str(MyEnum.FOO)='MyEnum.FOO'，验证了根因来自 enum 的 __str__ 而无需完整模型。",
+          "impact": "提供了可复现的反例。支持得分。"
+        },
+        {
+          "location": "steps 19, 34-35 (alternative checks)",
+          "observation": "检查 int(member) 是 int、f-string/format 输出值——排除了字段转换层和 __format__ 层的替代解释。",
+          "impact": "帮助确认应在 enum 层修 __str__。但未通过真实 Django model+DB 试验区分所有假设；仍有部分靠推断。扣少量分。"
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 23,
+      "max_score": 25,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 37-38 (diff of django/db/models/enums.py)",
+          "observation": "在 Choices 基类中加入 `def __str__(self): return str(self.value)`，改动仅 3 行。",
+          "impact": "修复位于正确责任层且对 TextChoices/IntegerChoices 及所有 Choices 子类通用；该行为与实际 Django 修复一致。支持得分。"
+        },
+        {
+          "location": "step 50 (model_enums run)",
+          "observation": "16 个测试全部通过，包括 repr、label、value、choices、containment、functional API 等契约断言。",
+          "impact": "证明 __str__ 覆盖未破坏既有 API/状态/异常契约。支持得分。"
+        },
+        {
+          "location": "steps 41,44 (model_fields/invalid_models runs)",
+          "observation": "model_fields 310 测试和 invalid_models_tests 194 测试均 OK。",
+          "impact": "API/状态相关回归面较广；但这些大套件没有新增针对最终补丁的 str 断言，边界（空值/复杂 mixin、全部成员类型）验证仍偏间接。微扣小分。"
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 17,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 36/39 (model_enums runs)",
+          "observation": "同一 16 项测试在修前和修后都通过——未含 str() 断言的旧套件无法区分修复，缺少真正 test-level 的 red→green 基线。",
+          "impact": "修前基线（针对新断言）缺失，扣分。"
+        },
+        {
+          "location": "steps 48-50 (test modification & run)",
+          "observation": "agent 在修复之后才向 model_enums/tests.py 加入 `assertEqual(str(Suit.DIAMOND),'1')` 及 TextChoices 对应断言并运行通过。",
+          "impact": "有新断言绿测，但从未让其先失败；且改动本身违反指令不得改测试。支持得一部分分，也扣 baseline/clean 分。"
+        },
+        {
+          "location": "step 6 plus steps 27-28 (python probes)",
+          "observation": "直接对 str/type/== 做红方和绿方实验，覆盖 TextChoices/IntegerChoices 两个主场景。",
+          "impact": "机制层有反例与验证，但没有在 Django Model/DB 检索路径上端到端执行 PR 的两个测试场景。证据缺口，扣分。"
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 8,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 5-6 (SyntaxError)",
+          "observation": "一行 class 定义语法错误，agent 立即改为多行脚本重跑成功。",
+          "impact": "正确分类语法错误并快速恢复，保留返回码。支持得分。"
+        },
+        {
+          "location": "steps 48-49 (UnicodeDecodeError)",
+          "observation": "修改测试文件时遭遇 ascii 解码错误，随后显式 encoding='utf-8' 重跑成功。",
+          "impact": "错误识别和修复明确。支持得分。"
+        },
+        {
+          "location": "steps 52-54 (patch workflow)",
+          "observation": "创建 patch（仅源文件）、查看、再用确切命令提交分开执行，无管道掩盖或异常吞掉。",
+          "impact": "收尾命令纪律良好。扣分点仅在重复/低产出的全局 grep（如 step 30 超长输出）较少但存在。"
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 5.5,
+      "max_score": 10,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "step 52 (patch creation)",
+          "observation": "`git diff -- django/db/models/enums.py > patch.txt`，patch 仅含源文件改动，headers 为 --- a/+++ b/。",
+          "impact": "提交物范围正确、可应用性高（内容与期望修复一致）。支持得分。"
+        },
+        {
+          "location": "steps 48-51,54 (leftover test edits)",
+          "observation": "tests/model_enums/tests.py 的改动从未回退，full git diff 显示两者都被修改；虽然 patch 排除了测试文件，任务指令明确 DO NOT MODIFY tests。",
+          "impact": "验证环境与最终提交物不完全一致，且无 git status/git diff --check 检查。扣分。"
+        },
+        {
+          "location": "step 54 (submit command)",
+          "observation": "使用题目规定的 `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt` 且无 commit。",
+          "impact": "提交协议符合要求，但缺少对工作区的诚实总结/核验。支持少量得分。"
+        }
+      ]
+    }
+  },
+  "raw_total_score": 77.5,
+  "total_score": 77.5,
+  "evidence_confidence": "medium",
+  "caps_or_flags": [
+    "NO_BASELINE"
+  ],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/db/models/enums.py"
+      ],
+      "patch_status": "patch.txt 已生成并 cat 验证，内容为在 Choices 基类加入 __str__；未独立重新 apply 验证"
+    },
+    "timeline": [
+      "steps 3-6: 定位 TextChoices 定义，用纯 Python 复现 str(member)='EnumName.MEMBER'",
+      "steps 7-26: 追踪 Field.to_python/get_prep_value、DeferredAttribute、Model.__init__，理解对象创建体与db回读转换路径",
+      "steps 27-35: 实验验证 __str__ 覆盖会生成值、保留 isinstance/==，并区分 f-string/format 行为",
+      "steps 36-37: 修复前跑 model_enums 16 项通过；随后修改 django/db/models/enums.py 加 __str__",
+      "steps 39-44,50: 修复后多次运行 model_enums、model_fields、invalid_models_tests 均 OK",
+      "steps 48-49: 修改 tests/model_enums/tests.py 加入 str() 断言（违反任务规则，未回退）",
+      "steps 51-54: 生成只含 enums.py 的 patch.txt、cat 校验、按格式提交"
+    ],
+    "environment": [
+      "cwd=/testbed，Django 源码树；python 解释器路径 /opt/miniconda3/envs/testbed/lib/python3.6（ascii 错误体现 py3.6）",
+      "测试用 `python tests/runtests.py <label>`，默认最多 64 进程；sqlite 测试库临时创建/销毁",
+      "git 工作树原有改动仅来自 agent；django/db/models/enums.py 为 100755"
+    ],
+    "evidence_gaps": [
+      "没有在 Django Model+DB 层面按 PR 的两个测试（对象刚创建/从库取出）执行 end-to-end red→green",
+      "新增的 str() 测试断言在修复后添加并只运行过绿色侧；修前 fail 仅来自纯 Python 探针而非真实 runner",
+      "tests/model_enums/tests.py 被修改却在最终 patch 中排除，且未回退；验证环境与提交物不完全一致",
+      "patch.txt 未被实际 git apply 到干净基线，也未做 git diff --check"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "str(enum 成员) 应返回其值（如 'first'、'1'），而不是 'ClassName.MEMBER'",
+      "模型字段含 TextChoices/IntegerChoices 时，新建对象取属性 str() 与 db 回读后保持一致",
+      "TextChoices/IntegerChoices 成员仍应 isinstance str/int、== 对应基础值"
+    ],
+    "negative_or_compatibility_behavior": [
+      "repr()（如 <Suit.DIAMOND: 1>）、.label/.value/.choices/.values/.names 等 API 保持原行为",
+      "enum 成员相等性、成员资格（in）及 label 含 Promise/gettext_lazy 的行为不变",
+      "f-string/.format 的输出不应因 __str__ 修改而改变语义（agent 已探测确认）"
+    ],
+    "boundaries": [
+      "非文本/整数 mixin 的 Choices（bytes/float/date/Decimal 等）若 str() 到 value 不应抛错",
+      "__empty__/None 值不应进入 __str__ 调用路径；空字符串 TextChoices 与自动 label 不受影响",
+      "IntegerChoices 的 0/负数等 int 值 str() 后必须可读且不破坏数据库准备值"
+    ],
+    "forbidden_changes": [
+      "不得修改测试文件（任务指令 DO NOT MODIFY tests）",
+      "不应改动 CharField/IntegerField 的 to_python/get_prep_value 的异常契约"
+    ],
+    "unknowns": [
+      "模型层 created vs retrieved 的完整差异是否在真实数据库往返中还有别的表象（未运行此类测试）",
+      "所有自定义 mixin 类别逐个 str() 是否会显示等价字符串（测试套件只检查 labels/choices）",
+      "评测时对 agent 留下的 tests/model_enums 改动会如何处理（不影响提交 patch 内容）"
+    ]
+  },
+  "evidence_gaps": [
+    {
+      "location": "steps 48-51",
+      "observation": "新 str 断言加在源码修复之后，从未在同一测试上看到 red；测试文件改动也未回退。",
+      "impact": "D-修前基线/A 的复现计划部分依赖纯 python 证据，而非真实 runner；降低 D、F 分数透明度。"
+    },
+    {
+      "location": "steps 36-52",
+      "observation": "所有 runner 验证都运行在含 agent 测试改动的树上，而最终 patch 只有 enums.py。",
+      "impact": "验证对象与提交物不完全一致；风险是 regressions 不能完全归因于提交 patch。"
+    },
+    {
+      "location": "整个轨迹",
+      "observation": "未提供任何步骤中修改后文件的完整重读或 model/DB round-trip 的 red→green 证据；patch.txt 未独立应用到干净基线。",
+      "impact": "最终正确性需依赖内容与实际 Django 修复相仿这一推断；证据置信度定为 medium。"
+    }
+  ],
+  "key_strengths": [
+    {
+      "location": "step 37/38 (final diff)",
+      "observation": "修复置于 Choices.__str__ 这一正确通用层，改动最小、风格一致，且与已知 Django 修复方向一致。",
+      "impact": "C 得高分；patch 对 Text/Integer 两种主场景均泛化。"
+    },
+    {
+      "location": "steps 6, 27-28, 34-35 (python probes)",
+      "observation": "直接探测证明 str(enum) 与 f-string/format 输出不同，提出了可验证的语义断言（isinstance、==、str 值）。",
+      "impact": "A/B 的根因判断和验收标准基本成立。"
+    },
+    {
+      "location": "steps 41, 44, 50 (large related suites)",
+      "observation": "model_enums、model_fields、invalid_models_tests 均 OK 且返回码完整。",
+      "impact": "D/E 提供了较广的相关回归面和可审计的输出证据。"
+    }
+  ],
+  "key_risks": [
+    {
+      "location": "steps 48-49",
+      "observation": "修改了任务明令不可修改的 tests/model_enums/tests.py 且未回退；新增断言未先跑红色基线。",
+      "impact": "D 验证链有顺序漏洞；若 patch 被剥离测试断言后独立跑 gold 测试，结论依赖外部测试集推断。"
+    },
+    {
+      "location": "全轨迹缺少 model+DB 复现",
+      "observation": "没有按 PR 创建真实 model/数据库往返来观察 created vs retrieved 的 str 行为。",
+      "impact": "对 issue-oracle 最直接的验收证据缺失，A/D 未满分原因。"
+    },
+    {
+      "location": "step 52 patch 排除测试改动",
+      "observation": "最终 patch 只含源码是符合 submission 规则的，但验证环境含测试改动，导致'验证对象与提交物不一致'的审计风险。",
+      "impact": "F 的清理与最终状态一致性仅得部分分。"
+    }
+  ],
+  "conclusion": "最终补丁本身非空、内容最小且指向正确责任层——在 Choices 上实现 __str__ 返回 str(value)，这是可信且与 Django 上游一致的修复方向；相关回归（model_enums、model_fields、invalid_models_tests）以完整状态码通过。主要缺口是：没有在模型+DB 路径上端到端演示 PR 描述场景的 red→green，新增的 str 断言只在修复后运行且违反了不改测试的边界，测试文件残留导致验证环境与提交物不完全一致。结论：补丁可信度较高，但过程证据不足以支持满分的测试设计，且工作区卫生存疑。",
+  "instance": "django__django-11964",
+  "submission": "20260901_mini-v2.4.2_gemini-3-5-flash",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-11964/20260901_mini-v2.4.2_gemini-3-5-flash.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788931810,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}
