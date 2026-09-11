@@ -1,0 +1,259 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 9.0,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 22-24",
+          "observation": "Reproduced the reported failure exactly: `TypeError: int() argument must be ... not 'SimpleLazyObject'` / `Field 'id' expected a number ...`",
+          "impact": "Supports understanding of the observable failure mode."
+        },
+        {
+          "location": "step 48 / 49",
+          "observation": "Agent discovered the same query fails without SimpleLazyObject (plain `User`), and that plain/foreign-key filtering works; it treated the Model instance as the real issue later.",
+          "impact": "Partially refines the oracle, but the initial PR framing described only the lazy object path."
+        },
+        {
+          "location": "steps 111, 135, 140",
+          "observation": "Acceptance was treated as 'query executes without error'; no data-row assertion exists for the original test case.",
+          "impact": "Only partial acceptance validation; success criteria were not tied to expected rows."
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 8.0,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 16-20",
+          "observation": "Located regression commit 3543129822 'Moved subquery expression resolving to Query' and inspected `lookups.get_prep_lookup()`/`Field.get_prep_value()` call chain.",
+          "impact": "Good causal-path investigation."
+        },
+        {
+          "location": "steps 43-46",
+          "observation": "Applied a LazyObject unwrap in `Field.get_prep_value`; then the error changed to `not User`, proving an independent remaining cause and prompting Model-pk handling.",
+          "impact": "Hypothesis iteration with observable intermediate failure."
+        },
+        {
+          "location": "step 109 vs 111",
+          "observation": "After adding `Model -> value.pk` to `IntegerField.get_prep_value` the repro script stopped failing.",
+          "impact": "Validates the chosen layer sufficiently for the main path; does not exclude alternative layers (subquery/lookup resolution)."
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 11.0,
+      "max_score": 25,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "final patch (steps 139, 142)",
+          "observation": "Final patch modifies only `django/db/models/fields/__init__.py`: adds LazyObject unwrap in `Field.get_prep_value`, and Model-pk coercion in IntegerField, FloatField, and DecimalField.to_python.",
+          "impact": "Main reproduction (error) is fixed, but changes are scattered over four semantic sites instead of one common prep/lookup layer."
+        },
+        {
+          "location": "steps 121-134",
+          "observation": "Agent explicitly extended the Model-pk coercion to FloatField and DecimalField without any failing scenario requiring those fields.",
+          "impact": "Broad, speculative behavior change: every non-integer float/decimal field will now silently treat a Model instance as its pk; compatibility risks were not tested."
+        },
+        {
+          "location": "steps 111, 140",
+          "observation": "The only full repro of the original scenario returns `<QuerySet []>` because no rows were seeded for A/B/C; the query no longer crashes, but positive behavior is not asserted.",
+          "impact": "Core fix likely works but lacks end-to-end functional proof; edge cases (non-numeric pk, wrong pk type, negative fields) remain unchecked."
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 12.0,
+      "max_score": 25,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "steps 24 / 46 / 111",
+          "observation": "Pre-fix reproduction emitted the reported TypeError; after the IntegerField/Model change the same script ran with SUCCESS output.",
+          "impact": "Requirement for a red/green rerun on the same code path is satisfied."
+        },
+        {
+          "location": "step 136",
+          "observation": "Ran existing promise-field tests: `Ran 24 tests ... OK`.",
+          "impact": "Relevant regression set for old Promise behavior, but no test suite was added for the new LazyObject/Model path."
+        },
+        {
+          "location": "steps 111 / 140 / 49",
+          "observation": "Successful post-fix runs only assert 'executed without error', never that the expected A row is returned; independent helper scripts that do seed data wrap `user.pk`, not the `SimpleLazyObject(User)` used by the issue.",
+          "impact": "Verification lacks a positive behavioral assertion for the reported scenario; blind spots include direct-User-rhs behavior after fix."
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 3.5,
+      "max_score": 10,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "steps 71-92, 97-105",
+          "observation": "Repeated malformed commands produced returncode 127/126 or Bash syntax errors (e.g. `[{print(f:: command not found`), burning many steps.",
+          "impact": "Poorly disciplined shell usage despite the interactive constraints."
+        },
+        {
+          "location": "steps 22-24",
+          "observation": "Correctly distinguished the missing `asgiref` environment problem from the application bug and repaired it with `pip install -e .`.",
+          "impact": "Proper error classification in that instance."
+        },
+        {
+          "location": "steps 113-117",
+          "observation": "Test invocation using package labels (instead of test-module labels) failed through loaded-suite errors, then agent proceeded without running the intended broader suite.",
+          "impact": "Failure recovery stopped; no further run of a broader relevant regression suite was attempted."
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 7.0,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 141-144",
+          "observation": "Created `patch.txt` via `git diff django/db/models/fields/__init__.py`, visually inspected it, and submitted with the exact submit command.",
+          "impact": "Final patch content is non-empty, limited to the source file, and its headers are consistent."
+        },
+        {
+          "location": "steps 22-120 (files created)",
+          "observation": "Numerous `reproduce_issue.py`, `test_*.py` helper files remain in `/testbed`; no `git status` or cleanup/removal of these untracked files is documented.",
+          "impact": "Working tree hygiene is incomplete, though untracked helpers do not enter the submitted patch."
+        },
+        {
+          "location": "step 144",
+          "observation": "Submission is `echo ... && cat patch.txt` without a commit; patch summary equals the visible diff hunks.",
+          "impact": "Patch hygiene matches required protocol except for the missing state check and leftover temporary files."
+        }
+      ]
+    }
+  },
+  "raw_total_score": 50.5,
+  "total_score": 50.5,
+  "evidence_confidence": "medium",
+  "caps_or_flags": [
+    "MAIN_CASE_ONLY"
+  ],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/db/models/fields/__init__.py"
+      ],
+      "patch_status": "patch.txt generated by git diff; working tree contains the modification"
+    },
+    "timeline": [
+      "Steps 3-20: explored model fields, lazy objects, lookups and identified regression commit 3543129822",
+      "Steps 22-24: wrote and ran reproduce_issue.py; observed reported TypeError",
+      "Steps 41-45: added LazyObject unwrap in base Field.get_prep_value; error changed to 'not User'",
+      "Step 109: added Model->pk handling in IntegerField.get_prep_value; reproduction then prints SUCCESS (empty result)",
+      "Steps 121-134: also added Model->pk paths to FloatField and DecimalField.to_python",
+      "Steps 136-138: ran promise field regression (24 OK) and local FK/PK scenarios",
+      "Steps 141-144: created, inspected, and submitted patch.txt"
+    ],
+    "environment": [
+      "SQLite in-memory Django app, workspace /testbed",
+      "asgiref missing initially; `pip install -e .` repaired dependency",
+      "pytest unavailable; ./tests/runtests.py works for test module labels but failed for package directory labels"
+    ],
+    "evidence_gaps": [
+      "No row-seeded end-to-end assertion that `SimpleLazyObject(lambda: User)` filtering matches the intended A row",
+      "No re-run of the plain-User (non-lazy) failing variant after the final fix",
+      "No suite covering all fields or lookup compatibility for the new Model-pk coercion behavior",
+      "Worktree state/untracked helper files never checked via `git status`"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "Filtering `A.objects.annotate(owner_user=Subquery(...)).filter(owner_user=SimpleLazyObject(lambda: user))` should not raise TypeError and should return the expected correlated rows."
+    ],
+    "negative_or_compatibility_behavior": [
+      "Existing `lazy()`/Promise `get_prep_value` behavior (test_promises) must remain intact",
+      "No unrelated configuration/test file changes in the final source patch",
+      "Existing Model-instance filtering on real ForeignKey fields must continue to work"
+    ],
+    "boundaries": [
+      "With no nested Subquery annotation, SimpleLazyObject filtering of a plain FK-like / id column also needs behavior",
+      "Model values appearing as RHS against non-FK numeric fields should behave consistently, but this was not explicitly defined in the issue"
+    ],
+    "forbidden_changes": [
+      "Changes to tests or configuration files",
+      "Silent acceptance of invalid non-int values beyond the scoped Model/pk conversion"
+    ],
+    "unknowns": [
+      "Whether the intended upstream fix occupies `Field.get_prep_value`, the lookup layer, or `SimpleLazyObject` itself",
+      "Whether the full Django query regression suite (e.g., queries/many-to-one/queryset annotations) would pass with this patch",
+      "Exact hidden test expectations for this SWE-bench instance"
+    ]
+  },
+  "evidence_gaps": [
+    {
+      "location": "reproduce_issue.py (steps 22, 111, 140)",
+      "observation": "Script never inserts A/B/C rows; so 'SUCCESS' proves only absence of exceptions, not correct result selection.",
+      "impact": "Cannot confirm the main positive behavior or rule out wrong SQL conditions."
+    },
+    {
+      "location": "test_without_lazy.py (step 48)",
+      "observation": "Plain-User RHS failed identically before the fix, but after the fix no direct-User subquery rerun is shown.",
+      "impact": "The independent cause (Model handling) lacks post-fix positive validation."
+    },
+    {
+      "location": "patch hunks in fields/__init__.py (steps 139/142)",
+      "observation": "Model->pk conversion was added to Integer/Float/Decimal fields plus to DecimalField.to_python; no tests exercise non-PK edge values, negative signs, string PKs or field name validations.",
+      "impact": "Compatibility of the widened coercion is unknown."
+    }
+  ],
+  "key_strengths": [
+    {
+      "location": "steps 19-24",
+      "observation": "Agent traced the regression commit and reproduced the actual reported failure with a focused script before editing source."
+    },
+    {
+      "location": "steps 43-46, 109-111",
+      "observation": "Iterated from LazyObject unwrap to Model-pk handling using live evidence and got the repro script from crash to no-error state."
+    },
+    {
+      "location": "step 136",
+      "observation": "Re-ran the existing Promise-field regression set and confirmed 24 tests still pass after the final source edits."
+    }
+  ],
+  "key_risks": [
+    {
+      "location": "steps 121-134 (Float/Decimal edits)",
+      "observation": "Semantic extension to FloatField and DecimalField accepted by no failing issue scenario; code divergence from existing conventions and risk of silently coercing user errors.",
+      "impact": "The patch may solve the symptom globally while changing field coercion semantics beyond the reported defect."
+    },
+    {
+      "location": "reproduce_issue.py / test_*.py",
+      "observation": "No test asserts that the filtered result contains or excludes a specific A row for the exact SimpleLazyObject(User) scenario.",
+      "impact": "Real regression is only half-verified (no crash, no result semantics)."
+    },
+    {
+      "location": "steps 71-105",
+      "observation": "A long series of malformed bash/JSON commands polluted the interactive execution; no cleanup step executed afterward.",
+      "impact": "Reduces trust in disciplined exploration and leaves unnecessary helper files in the workspace."
+    }
+  ],
+  "conclusion": "The submitted patch fixes the reported crash path: it forces SimpleLazyObject in the base field prep and then converts a surviving Model instance to its primary key in IntegerField, with analogous changes in FloatField and DecimalField. However, the evidence is only sufficient for 'the query no longer crashes'; no seeded end-to-end assertion proves the intended row/equality semantics, and the Model-pk coercion is applied far beyond the issue's demonstrated scope. The final diff is clean with respect to source-only changes and was correctly generated and submitted, but process hygiene and verification completeness are limited; whether the hidden official tests pass remains unproven by the trajectory itself.",
+  "instance": "django__django-12663",
+  "submission": "20260217_mini-v2.0.0_glm-5-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-12663/20260217_mini-v2.0.0_glm-5-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788932118,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}

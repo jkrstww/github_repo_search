@@ -29,6 +29,7 @@ metrics。写入文件时，JSONL 每行对应一个源文件；可选的汇总 
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -48,6 +49,27 @@ SKIP_DIRECTORIES = {
     "oh_modules",
 }
 CONTROL_WORDS = {"if", "for", "while", "switch", "catch", "else", "do", "try"}
+FUNCTION_NODE_TYPES = {"function", "method", "callback"}
+CONTAINER_NODE_TYPES = {"class", "struct", "interface"}
+
+
+@dataclass(frozen=True)
+class FunctionInfo:
+    """从语法树 JSONL 恢复的函数位置与归属信息。"""
+    path: str; node_type: str; name: str; qualified_name: str; owner_name: str | None
+    owner_modifiers: tuple[str, ...]; start_line: int; end_line: int; signature: str; modifiers: tuple[str, ...]
+    @property
+    def identity(self) -> str: return f"{self.path}::{self.qualified_name}"
+    @property
+    def is_anonymous(self) -> bool: return self.name.startswith("anonymous@")
+    def to_dict(self) -> dict[str, Any]:
+        return {"path": self.path, "node_type": self.node_type, "name": self.name, "qualified_name": self.qualified_name, "owner_name": self.owner_name, "owner_modifiers": list(self.owner_modifiers), "start_line": self.start_line, "end_line": self.end_line, "signature": self.signature, "modifiers": list(self.modifiers)}
+
+
+@dataclass(frozen=True)
+class ImportBinding:
+    """一个解析后且已定位到仓库内文件的 import 绑定。"""
+    local_name: str; imported_name: str; source_path: str; kind: str
 
 
 @dataclass
@@ -277,6 +299,59 @@ def extract_calls(source: str) -> list[dict[str, Any]]:
             }
         )
     return calls
+
+
+def load_syntax_tree_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    """读取本模块写出的语法树 JSONL。"""
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def flatten_functions(records: list[dict[str, Any]]) -> list[FunctionInfo]:
+    """将嵌套语法树展平为带限定名和源码范围的函数目录。"""
+    result: list[FunctionInfo] = []
+    def visit(path: str, node: dict[str, Any], names: list[str], owner: str | None, owner_modifiers: tuple[str, ...]) -> None:
+        node_type = node.get("type", ""); next_names = list(names); next_owner = owner; next_modifiers = owner_modifiers
+        if node_type in CONTAINER_NODE_TYPES:
+            next_owner = node.get("name") or None; next_modifiers = tuple(node.get("modifiers", [])); next_names.append(node.get("name", "<anonymous>"))
+        if node_type in FUNCTION_NODE_TYPES:
+            name = node.get("name", ""); display = f"anonymous@{node.get('start_line')}" if name == "anonymous" else name
+            qualified = ".".join(next_names + [display]) if next_names else display
+            result.append(FunctionInfo(path, node_type, display, qualified, next_owner, next_modifiers, int(node.get("start_line", 1)), int(node.get("end_line", node.get("start_line", 1))), node.get("signature", ""), tuple(node.get("modifiers", []))))
+            next_names.append(display)
+        for child in node.get("children", []): visit(path, child, next_names, next_owner, next_modifiers)
+    for record in records: visit(record["path"], record["tree"], [], None, ())
+    return result
+
+
+def extract_function_callees(source: str, function: FunctionInfo) -> set[str]:
+    """提取指定函数源码范围内的去重调用表达式。"""
+    snippet = "".join(source.splitlines(keepends=True)[function.start_line - 1:function.end_line])
+    calls = set()
+    for call in extract_calls(snippet):
+        name = call["callee"].split(".")[-1]
+        if name not in CONTROL_WORDS and name != function.name: calls.add(call["callee"])
+    return calls
+
+
+def build_import_index(records: list[dict[str, Any]]) -> dict[str, list[ImportBinding]]:
+    """为相对导入建立按源文件索引的公共绑定目录。"""
+    paths = {record["path"] for record in records}; index: dict[str, list[ImportBinding]] = {}
+    for record in records:
+        bindings: list[ImportBinding] = []
+        for item in record.get("imports", []):
+            source = item.get("source", ""); base = posixpath.normpath(posixpath.join(posixpath.dirname(record["path"]), source))
+            resolved = next((p for p in (base, base+".ets", base+".ts", base+"/index.ets", base+"/index.ts") if source.startswith(".") and p in paths), None)
+            if not resolved: continue
+            clause = item.get("clause", "").strip(); named = re.search(r"\{([^}]*)\}", clause)
+            if named:
+                for part in named.group(1).split(","):
+                    names = re.split(r"\s+as\s+", part.strip())
+                    if names and names[0]: bindings.append(ImportBinding(names[-1], names[0], resolved, "named"))
+            prefix = clause.split("{", 1)[0].strip().rstrip(",").strip()
+            if prefix.startswith("* as "): bindings.append(ImportBinding(prefix[5:].strip(), "*", resolved, "namespace"))
+            elif re.match(r"^[A-Za-z_$][\w$]*$", prefix): bindings.append(ImportBinding(prefix, "default", resolved, "default"))
+        index[record["path"]] = bindings
+    return index
 
 
 def detect_node(

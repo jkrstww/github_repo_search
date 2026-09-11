@@ -1,0 +1,275 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 6,
+      "max_score": 15,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "step 16-19 / bash:15, bash:16",
+          "observation": "将 `json.dumps(value, cls=self.encoder)` 改为 `json.dumps(value, cls=self.encoder, ensure_ascii=False)`，并模拟输出中文不再转义，说明代理理解默认 ensure_ascii=True 是显示问题的根源。",
+          "impact": "支持得分：问题机制识别正确。"
+        },
+        {
+          "location": "step 9-11, 29-31",
+          "observation": "没有在修改前运行任何真实 JSONField 复现，也没有用修改后的真实字段断言中文等非 ASCII 内容输出；验收标准未显式化为可执行断言。",
+          "impact": "导致扣分：缺少可用于 red/green 验收的可复现矩阵。"
+        },
+        {
+          "location": "step 20 / cat tests/forms_tests/field_tests/test_jsonfield.py",
+          "observation": "读取了现有测试，但该文件中没有任何非 ASCII / unicode / 中文相关测试；代理也未补充自己的反例。",
+          "impact": "导致扣分：边界与复现计划为空。"
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 7,
+      "max_score": 15,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "step 7, 15-16 / cat django/forms/fields.py; grep -n json.dumps",
+          "observation": "正确定位到 `django.forms.fields.JSONField.prepare_value` 是 admin 渲染 JSON 值的关键路径，并把根因归于 json.dumps 默认 ASCII 转义。",
+          "impact": "支持得分：责任层判断正确。"
+        },
+        {
+          "location": "step 13 / grep -rn json.dumps /testbed/django",
+          "observation": "浏览了 Django 中全部 json.dumps 调用点，但没有追踪 ModelAdmin/表单渲染调用链，也没有验证 admin textarea 的 initial 值实际来自 prepare_value。",
+          "impact": "导致扣分：调用链证据不足。"
+        },
+        {
+          "location": "step 9, 19, 32",
+          "observation": "修复前未能成功 import Django 运行复现；修复后仅用 MockJSONField 模拟 prepare_value，未对真实 django.forms.JSONField 做因果实验。",
+          "impact": "导致扣分：缺少真实数据/控制链验证。"
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 21,
+      "max_score": 25,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 17, 33 / sed -i; git diff",
+          "observation": "最终补丁为 1 行最小改动：`return json.dumps(value, cls=self.encoder, ensure_ascii=False)`，只修改了 django/forms/fields.py，符合最小且风格一致。",
+          "impact": "支持得分：核心语义和代码卫生优秀。"
+        },
+        {
+          "location": "step 32 / python -c mock",
+          "observation": "对中文、emoji、重音字符和 ASCII 做了模拟输出检查，确认普通非 ASCII 场景下文本不再被转义。",
+          "impact": "支持得分：若干主边界行为预期正确。"
+        },
+        {
+          "location": "step 20, 29-31 / 现有测试及运行",
+          "observation": "没有验证自定义 encoder（如 DjangoJSONEncoder）与 ensure_ascii=False 的组合行为，也没有检查 has_changed 的转义一致性、InvalidJSONInput 分支或 admin 真实渲染路径。",
+          "impact": "导致扣分：部分兼容性边界缺乏直接验证。"
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 6,
+      "max_score": 25,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "step 9-11 / python3 -c import django.forms.JSONField",
+          "observation": "修复前唯一尝试的真实复现因缺少 asgiref、pytz 失败，此后从未在真实 Django JSONField 上演示修复前\\u4e2d\\u56fd 输出。",
+          "impact": "导致扣分：没有修前失败基线。"
+        },
+        {
+          "location": "step 29-31 / PYTHONPATH=/testbed python tests/runtests.py ...",
+          "observation": "修复后运行了 forms_tests.field_tests.test_jsonfield（12 passed）和 model_fields.test_jsonfield（78 passed, 8 skipped），但测试文件里没有非 ASCII 行为断言，所以这些通过并不能证明修复有效。",
+          "impact": "部分支持回归，但不能证明同一路径 red→green。"
+        },
+        {
+          "location": "step 32 / MockJSONField 模拟",
+          "observation": "唯一针对中文/emoji 的断言是复制 prepare_value 逻辑的 MockJSONField，不是真实 django.forms.JSONField，不是真实 admin/表单路径，且最终提交中没有对应测试。",
+          "impact": "导致扣分：目标行为验证为 mock 性质，D 上限抑制。"
+        },
+        {
+          "location": "step 31, 35",
+          "observation": "现有测试输出以 head/tail 截断，重要中间结果缺失；虽有最终 OK 和补丁内容，但缺少“提交前修复行为断言”的完整证据链。",
+          "impact": "导致扣分：证据完整性和最终状态一致性不足。"
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 6.5,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 10, 24 / pip install asgiref; pip install pytz sqlparse",
+          "observation": "依赖缺失时安装最小依赖使环境可运行，随后用 `PYTHONPATH=/testbed python tests/runtests.py` 正确执行 Django 测试。",
+          "impact": "支持得分：环境故障分类基本正确。"
+        },
+        {
+          "location": "step 22-25 / 测试命令链",
+          "observation": "pytest 不存在、settings 模块名错误时没有反复重试错误命令，而是通过寻找 runtests.py 调整执行方式。",
+          "impact": "支持得分：反馈驱动调整合理。"
+        },
+        {
+          "location": "step 9, 19, 32 / python3 -c 模拟脚本",
+          "observation": "修复验证停留在标准库 json.dumps 和 MockJSONField 模拟，未用修复后的真实表单字段验证；关键命令输出多处被 head/tail 截断（尽管最终能看到 OK）。",
+          "impact": "导致扣分：验证路径窄且有输出丢失。"
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 6.5,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 33-35 / git diff; cat patch.txt",
+          "observation": "生成并检查了 patch.txt，补丁为一处 hunk、仅含 django/forms/fields.py，头为 --- a/+++ b/，非空且可审计。",
+          "impact": "支持得分：补丁范围与格式良好。"
+        },
+        {
+          "location": "step 34 / git diff -- patch.txt 创建",
+          "observation": "未执行 git status、git diff --check；仓库中留有未跟踪 patch.txt（虽然按任务协议这通常是预期产物）。",
+          "impact": "导致扣分：状态检查不完整。"
+        },
+        {
+          "location": "step 36 / echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+          "observation": "提交命令按协议执行，但轨迹中没有该命令的 observation，无法确认提交输出；不过此前已 cat patch.txt 确认内容。",
+          "impact": "导致扣分：最终提交审计证据缺失。"
+        }
+      ]
+    }
+  },
+  "raw_total_score": 53,
+  "total_score": 53,
+  "evidence_confidence": "medium",
+  "caps_or_flags": [
+    "NO_BASELINE",
+    "NO_POST_FIX_TEST"
+  ],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/forms/fields.py"
+      ],
+      "patch_status": "nonempty; diff shown at steps 33-35; submission observation missing"
+    },
+    "timeline": [
+      "step 3-8: 定位带 JSONField 的源码并阅读 django/forms/fields.py",
+      "step 9-12: 尝试 import Django 失败，缺 asgiref/pytz",
+      "step 10/24: pip 安装依赖",
+      "step 13-16: 定位 json.dumps 调用点和 JSONField.prepare_value",
+      "step 17-18: 单行修改添加 ensure_ascii=False",
+      "step 19/32: 用纯 json.dumps/MockJSONField 模拟修复效果",
+      "step 20-21: 阅读现有 JSONField 测试，其中无 unicode 用例",
+      "step 29-31: 运行真实 Django 测试套件 12+78 例，无失败",
+      "step 33-35: 生成并查看 patch.txt",
+      "step 36: 提交命令，无 observation"
+    ],
+    "environment": [
+      "初始缺 asgiref、pytz、sqlparse（python -m pytest 也不可用）",
+      "使用 PYTHONPATH=/testbed 使 Django 可导入",
+      "runtests 创建 SQLite memory 测试库；部分含 json contains 特性的测试被跳过"
+    ],
+    "evidence_gaps": [
+      "没有修改前真实失败复现（首次真实验证因缺依赖失败，且未重做到修复后）",
+      "没有修复后针对非 ASCII 输出的真实 JSONField/admin 表单断言",
+      "最终提交命令 (step 36) 缺少 observable 输出",
+      "未检查 git status / git diff --check",
+      "自定义 encoder、has_changed 转义一致性、InvalidJSONInput 分支等兼容性未验证"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "django.forms.JSONField.prepare_value 应对包含中文等非 ASCII 的 dict/list 输出为可读 UTF-8 JSON（如 {\"country\": \"中国\"}）而不是 \\uXXXX",
+      "admin 中使用 JSONField 的 textarea 应显示可读 unicode",
+      "修复前后 JSON 数据仍可被 to_python 解析并 round-trip"
+    ],
+    "negative_or_compatibility_behavior": [
+      "ASCII JSON 输出格式不应改变（如 {\"a\": \"b\"}）",
+      "模型字段存储与序列化（db prepare/serializers）默认行为不应改变",
+      "自定义 encoder/decoder 仍应工作",
+      "InvalidJSONInput 分支和表单错误重新显示不应受修复影响",
+      "has_changed 比较仍应通过字符串规范化保持 key 顺序无关语义"
+    ],
+    "boundaries": [
+      "中文、emoji、重音字符等非 ASCII 字符串",
+      "嵌套 dict/list 且含非 ASCII 值",
+      "配合 DjangoJSONEncoder/custom encoder 的非 ASCII 输出",
+      "InvalidJSONInput、JSONString 等特殊包装对象",
+      "textarea HTML 渲染时的转义"
+    ],
+    "forbidden_changes": [
+      "不得修改测试文件或配置",
+      "最终提交不应包含 helper/repro 脚本",
+      "不得改变 JSONField 的 API 契约，如 encoder/decoder 参数、空值、错误行为"
+    ],
+    "unknowns": [
+      "真实 admin 视图中 JSONField 渲染和保存路径未经本轨迹验证",
+      "custom encoder 与自定义 __init__ 签名对 ensure_ascii kwarg 的兼容性未知",
+      "has_changed 对含非 ASCII 且混合转义输入的判定行为未验证",
+      "最终提交是否被外部系统成功收取和 apply 无轨迹证据"
+    ]
+  },
+  "evidence_gaps": [
+    {
+      "location": "step 9-11 vs 17-18",
+      "observation": "修复前的真实复现脚本从未成功运行；无法从观察事实中得出修复前输出为转义形式的断言。"
+    },
+    {
+      "location": "step 32",
+      "observation": "验证使用 MockJSONField 复制修复后逻辑，而非真实 django.forms.JSONField，不能证明实际代码路径行为。"
+    },
+    {
+      "location": "step 36",
+      "observation": "最终提交命令无 observation，提交输出不可确认。"
+    }
+  ],
+  "key_strengths": [
+    {
+      "location": "step 7, 13, 17",
+      "observation": "根因定位准确，修复点在正确的 `django.forms.fields.JSONField.prepare_value` 层。"
+    },
+    {
+      "location": "step 35",
+      "observation": "最终补丁是最小化的单行改动，只涉及源文件，不包含测试或配置改动。"
+    },
+    {
+      "location": "step 29-31",
+      "observation": "修复后运行了真实 Django 单元测试，基本形式测试和 model JSONField 测试全部通过，说明未破坏既有主路径。"
+    }
+  ],
+  "key_risks": [
+    {
+      "location": "step 9, 19, 32",
+      "observation": "没有修改前的失败基线，也没有修改后针对 unicode 输出的真实业务路径断言，因此只能从代码推理上认为补丁有效。",
+      "impact": "修复正确性未被执行验证证明；若上游存在 has_changed 或 encoder 兼容性反例，本轨迹无法发现。"
+    },
+    {
+      "location": "step 20-21",
+      "observation": "已有测试套件无不含 ASCII 用例，跑 12+78 测试全绿对本 issue 的区分度很低。",
+      "impact": "验证证据不足以排除回归或确认目标行为。"
+    },
+    {
+      "location": "step 36",
+      "observation": "提交命令缺失 observation，收尾审计链路不完整。",
+      "impact": "不能从轨迹确认提交实际被执行。"
+    }
+  ],
+  "conclusion": "最终补丁的根因定位和代码改动方向可信：在 `forms.JSONField.prepare_value` 中增加 `ensure_ascii=False` 能让包含中文等非 ASCII 字符的 JSON 于 admin textarea 中以可读字符显示，且修改范围最小、无测试/配置污染。但验证证据显著不足：没有修复前真实失败复现、没有修复后对真实字段的非 ASCII 输出断言，现有通过的测试对目标行为没有区分度，且最终提交无输出记录。因此补丁可信度主要来自代码分析而非执行证据；未验证的边界包括自定义 encoder、has_changed 转义语义以及真实 admin 渲染路径。",
+  "instance": "django__django-13512",
+  "submission": "20260217_mini-v2.0.0_kimi-k2-5-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-13512/20260217_mini-v2.0.0_kimi-k2-5-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788932932,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}

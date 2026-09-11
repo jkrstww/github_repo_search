@@ -1,0 +1,189 @@
+# SWE-bench-Verified 轨迹分析
+  - SWE-bench_Verified 数据集本身只包含 500 个评测任务，不包含 agent 的执行轨迹。
+  - 轨迹按提交/模型分散保存，通常位于官方匿名 S3，较新的提交位于提交者公开 GitHub 仓库。官方说明见 SWE-bench/experiments
+    README (https://github.com/SWE-bench/experiments)。
+
+  最方便的方式是使用官方仓库脚本：
+
+  git clone --depth 1 https://github.com/SWE-bench/experiments.git
+  cd experiments
+  pip install boto3 pyyaml
+
+  # 下载某个 Verified 提交的轨迹
+  python -m analysis.download_logs \
+    evaluation/verified/20241120_artemis_agent \
+    --only_trajs
+
+  # 下载全部 Verified 提交的轨迹
+  python -m analysis.download_logs \
+    evaluation/verified \
+    --only_trajs \
+    --skip_existing
+
+  轨迹会放到对应提交目录的 trajs/ 下，格式不统一，例如：
+
+  - .traj
+  - .txt
+  - .json
+  - .traj.json
+
+  也可以直接从 S3 下载单个文件：
+
+  curl -L \
+    'https://swe-bench-submissions.s3.amazonaws.com/verified/20241120_artemis_agent/trajs/astropy__astropy-12907.txt' \
+    -o astropy__astropy-12907.txt
+
+  S3 目录可以匿名列出：
+
+  curl -L \
+    'https://swe-bench-submissions.s3.amazonaws.com/?list-type=2&prefix=verified/20241120_artemis_agent/trajs/'
+
+  较新的提交会在 metadata.yaml 的 assets.repo 中指向公开 artifact 仓库，例如：
+
+  assets:
+    repo: https://github.com/john-b-yang/20260901_mini-v2.4.2_gemini-3-5-flash
+    trajs: .../tree/main/trajs
+
+  然后直接：
+
+  git clone --depth 1 \
+    https://github.com/john-b-yang/20260901_mini-v2.4.2_gemini-3-5-flash
+
+  注意：
+
+  1. 并非每个提交都保证轨迹完整，脚本会提示缺失的 trajs/。
+  2. trajs_docent 一类链接通常是在线浏览入口，不一定提供批量原始文件下载。
+  3. 同一提交可能包含 logs/、patch.diff、测试输出和轨迹；轨迹内容和字段取决于 agent 实现。
+  4. 当前官方仓库还提供了 swebench submit verify，可以基于公开测试输出重新核验结果，无需重新执行 Docker。
+
+  ## 按年份批量下载
+
+  `download_trajs.py` 会扫描 `experiments/evaluation/` 下各 split 的提交目录，
+  默认下载目录名以 `2026` 开头的提交。目标目录已存在 `trajs/` 时会跳过，即使该目录为空：
+
+  ```bash
+  python download_trajs.py
+  python download_trajs.py --year 2025
+  ```
+
+  ## 找出结果不一致的轨迹
+
+  `diff_trajectories.py` 会读取指定数据集下、指定年份提交目录中的
+  `per_instance_details.json`，找出同一 sample 的 `resolved` 值不一致的提交，
+  并复制对应的 Harbor 轨迹（`trajs_harbor/<sample>/trajectory.json`）：
+
+  ```bash
+  python diff_trajectories.py
+  python diff_trajectories.py --year 2026 --dataset verified \
+    --output_dir experiments/diff_trajectories/verified
+  python diff_trajectories.py --diff_num 3
+  ```
+
+  默认输出目录为 `experiments/diff_trajectories/<dataset>/`。每个差异 sample
+  有一个同名目录，轨迹按 `<submission>.json` 保存；根目录的 `compare.json`
+  记录这些文件对应的 `resolved` 值。`--diff_num N` 只保留 true/false
+  两组中数量较少的一组至少为 `N` 的 sample；每次运行会清理该输出目录中的
+  上一次生成结果。只有存在且非空的 `trajs_harbor/` 提交目录才会参与比较。
+
+  ## 使用 Codex 分析轨迹
+
+  `analyse_trajectories.py` 接收一个 sample 目录和前一步生成的
+  `compare.json`，调用本机 `codex exec` 阅读轨迹并生成中文分析报告：
+
+  ```bash
+  python analyse_trajectories.py \
+    --trajectories_dir experiments/diff_trajectories/verified/sympy__sympy-20916 \
+    --trajectories_lable experiments/diff_trajectories/verified/compare.json
+  ```
+
+  报告写入输入目录下的 `analyse.md`，内容包括成功/失败原因、100 分制轨迹
+  评测细则、设计依据、具体案例和改进建议。Codex 以只读沙箱运行，不会修改
+  轨迹文件；`--timeout` 可调整单次分析的超时时间。
+
+  批量分析全部差异 sample：
+
+  ```bash
+  python batch_analyse_trajectories.py
+  ```
+
+  批处理脚本默认扫描 `experiments/diff_trajectories/verified/`，使用同目录下的
+  `compare.json`，并在每个 sample 目录生成 `analyse.md`。单个 sample 失败时会
+  继续处理其余目录，进程结束时汇总失败项；可用 `--timeout` 调整每条轨迹的分析
+  超时时间。
+
+  ## 单条轨迹量化评分
+
+  `trajectory_scoring_prompt.md` 提供基于 `rubric.md` 的单条轨迹评测提示词。将
+  `{{TRAJECTORY_PATH}}` 替换为 `trajectory.json` 路径后交给评测模型，模型会先建立
+  issue-specific oracle，再按 A-F 六个维度评分、应用封顶规则，并只返回严格 JSON，
+  方便批量收集过程分、证据置信度和风险标记。
+
+  ## 打分与 resolved 相关性验证
+
+  验证打分细则能否反映真实结局，分三步：盲打分 → 联表 → 统计。以
+  `experiments/diff_trajectories/verified/` 里“同一 instance、跨模型 resolved 不
+  一致”的轨迹为底座，标签取自 `compare_verified.json`（已删除 0/500 的
+  `20260226_mini-v2.0.0_gemini-3-pro-high`，保留 100 instance × 10 模型 = 1000 对，
+  True/False ≈ 582/406，分布均衡）。
+
+  1. 盲打分 `score_trajectories.py`：逐条轨迹调 codex，只把单条 `trajectory.json`
+     复制进临时空目录再 `codex exec --sandbox read-only`，评测模型看不到同 instance
+     的其他轨迹或上一步生成的 `analyse.md`，更不接触 `resolved` 标签；输出严格
+     JSON，校验 `total == ΣA..F`，失败重试一次后写占位并记 `scoring_failures.jsonl`。
+     已有的 `<base>.score.json` 默认跳过（可 `--force` 重打），中断可续跑。
+
+     ```bash
+     python score_trajectories.py --dry-run                      # 先看工作清单
+     python score_trajectories.py --timeout 1800 --concurrency 4 # 真正打分
+     python score_trajectories.py --instance astropy__astropy-13453   # 单题
+     python score_trajectories.py --judge-id gpt5 --max-pairs 50      # 子集/二判
+     ```
+
+     实测单条 codex 打分耗时可达十几分钟（与 `analyse_trajectories.py` 的 1800s
+     默认超时一致），1000 对建议在 tmux/screen 里后台跑并用 resume 续跑。
+
+     除本地 `codex` CLI 外，`--judge-backend api` 走**外部模型 API**：你提供
+     `--api-base`（OpenAI 兼容 base，如 `https://api.example.com/v1`）、令牌
+     `--api-key`（或从 `--api-key-env` 指定的环境变量读取，默认 `OPENAI_API_KEY`）、
+     `--api-model`，程序用纯标准库 `urllib` 向 `{api_base}/chat/completions` 发
+     `POST`，把单条轨迹 JSON 内联进 user message，取 `choices[0].message.content`
+     作为评分 JSON，复用同一套解析/校验/resume。judge_id 默认按模型名（如
+     `gpt-5.6-sol`）写 `<base>.score.gpt-5.6-sol.json`，便于多模型并判与二判对比。
+
+     ```bash
+     python score_trajectories.py --judge-backend api \
+       --api-base https://api.example.com/v1 \
+       --api-model gpt-5.6-sol \
+       --api-key "$OPENAI_API_KEY" \
+       --concurrency 8 --timeout 120
+     # json_object 模式默认开启；对方不支持时加 --no-api-json-mode
+     # 轨迹过大可加 --api-truncate 120000 限制内联长度（0=不裁剪）
+     ```
+
+  2. 联表 `build_scores.py`：把 `<base>.score.json` 与 `compare_verified.json` 的
+     `resolved` 合并成 tidy `scored_resolved.csv`（一行一对，含 model_name、A–F、
+     total、evidence_confidence、caps_or_flags、resolved），缺/残缺的落入
+     `unscorable.jsonl`。`resolved` 仅在此步从对比文件取，从不写进 score 文件。
+
+     ```bash
+     python build_scores.py
+     ```
+
+  3. 统计 `evaluate_scores.py`：纯标准库实现（无 numpy/scipy），因 `pyproject.toml`
+     声明 `dependencies = []` 且目标解释器未安装这些包。统计对非独立性显式建模：
+
+     - 主信号 **实例内配对 Δ**：每个同时含 True/False 的 instance 内
+       Δ = mean(分|True) − mean(分|False)，抵消题目难度；符号检验 + Wilcoxon。
+     - 全局 AUC-ROC / PR-AUC / point-biserial / Mann-Whitney，CI 用按 instance 聚类
+       的 bootstrap（避免同一 instance 被多模型重测而虚高 N）。
+     - 维度分解：`A+B+E`（纯过程）vs `C+D+F`（含 outcome 同义 caps）vs 全量 AUC，
+       用以区分“真过程信号”与“和 resolved 同义的封顶贡献”。
+     - 可选 `--extra-judge-csv` 计算 ICC(2,1) 跨判一致性。
+
+     ```bash
+     python evaluate_scores.py [--extra-judge-csv scored_resolved.gpt5.csv]
+     ```
+
+     产出 `evaluation_results.json` 与 `evaluation_report.md`。执行用 conda 3.13：
+     `/opt/miniconda3/bin/python -m unittest test_scoring_stats test_score_trajectories
+     test_build_scores test_evaluate_scores`。已知有效性威胁详见报告限制条件。

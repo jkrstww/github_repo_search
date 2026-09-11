@@ -1,0 +1,238 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 11.5,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 7/11 (repro.py)",
+          "observation": "The agent reproduced the reported symptom before the fix: the same queryset (annotate FilteredRelation, exclude(book_alice__isnull=False)) raised FieldError \"Cannot resolve keyword 'book_alice' into field\". The exception was caught inside the unittest so the runner printed the traceback but exited OK.",
+          "impact": "supports accurate problem understanding; weak formal red baseline"
+        },
+        {
+          "location": "step 43 (repro_complex with two authors)",
+          "observation": "After the one-line fix, exclude(book_alice__isnull=False) kept the author without a matching filtered book (count 1), matching the expected semantics of the issue.",
+          "impact": "supports the success criterion"
+        },
+        {
+          "location": "steps 49-50 (m2m FilteredRelation exclude)",
+          "observation": "The agent found that the same feature on an M2M FilteredRelation ('favorite_books') still raises OperationalError \"no such column: U5.title\", then abandoned that case without explaining or fixing it.",
+          "impact": "shows boundaries/reproduction plan were not carried through"
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 13,
+      "max_score": 15,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "steps 12-14, 18, 21-23",
+          "observation": "Traced `_filtered_relations` through Query init/clone, `names_to_path`, MultiJoin handling, and `split_exclude`; identified that the fresh inner `Query(self.model)` in `split_exclude` lack s the outer query's filtered-relation metadata.",
+          "impact": "strong causal chain at the correct layers"
+        },
+        {
+          "location": "steps 11 and 23-25",
+          "observation": "The unmodified repro produced FieldError; adding only `query._filtered_relations = self._filtered_relations.copy()` removed the error on the same repro and gave count 0.",
+          "impact": "direct causal validation via minimal code change"
+        },
+        {
+          "location": "steps 38-41",
+          "observation": "After the patch ran `PYTHONPATH=. python tests/runtests.py filtered_relation` (31 tests, 1 skip) and `python tests/runtests.py many_to_many reverse_lookup` (30 tests), both green, checking adjacent split_exclude/join paths.",
+          "impact": "supports layer-level regression thinking"
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 17,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "patch.txt / step 23",
+          "observation": "Final patch is one non-test source line in django/db/models/sql/query.py: `query._filtered_relations = self._filtered_relations.copy()` after creating the split_exclude inner query; the precisely reported FK/reverse-FK case works.",
+          "impact": "minimal, style-consistent, fixes the reported case"
+        },
+        {
+          "location": "step 50 m2m exclusion output",
+          "observation": "Exclude on an annotated M2M FilteredRelation still generates invalid SQL: the subquery's join condition references `U5.title`, where U5 is an alias not present in the subquery; deterministic `sqlite3.OperationalError` persists.",
+          "impact": "known deterministic counterexample; generality and alias handling incomplete; caps C to 18"
+        },
+        {
+          "location": "steps 48-51",
+          "observation": "Coverage is focused on reverse-FK FilteredRelation; M2M exclude and alias-relabeling scenarios are unverified beyond the discovered failure, and multiple temp repro scripts were exploratory rather than systematic assertions.",
+          "impact": "scope risk remains"
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 14,
+      "max_score": 25,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "step 11 vs step 25",
+          "observation": "Pre-fix FieldError was printed in the repro output but swallowed by a bare except block, so there was no actual failing test/baseline; post-fix rerun of the same script returned count 0 and exit 0.",
+          "impact": "evidence gap in red→green"
+        },
+        {
+          "location": "steps 48-50",
+          "observation": "Temporary tests/filtered_relation/test_fix.py contained real assertions: original `exclude(book_alice__isnull=False)` and `exclude(book_alice__title__icontains='poem')` both expected [author2] and passed; immediately afterward an M2M variant asserted same type of case and deterministically failed.",
+          "impact": "shows strong direction but discovered counterexample was never fixed/retested"
+        },
+        {
+          "location": "steps 38-41/49-51",
+          "observation": "Ran full filtered_relation suite (31 tests) and many_to_many/reverse_lookup (30 tests) after fix; none covers the failing M2M FilteredRelation exclude path; no post-cleanup comprehensive rerun after deleting temp tests.",
+          "impact": "existing regression evidence is real but contradicts excluded counterexample; final evidence set intentionally lacks failing case"
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 7.5,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 38-41",
+          "observation": "First attempts to run tests/runtests.py failed because PYTHONPATH was not set; classified as environment issue and quickly reran with `PYTHONPATH=.`, both suites then passed.",
+          "impact": "appropriate error classification and recovery"
+        },
+        {
+          "location": "steps 49-50",
+          "observation": "On the m2m exclude failure, agent printed `qs.query` and correctly identified malformed subquery alias instead of masking the error; however, iteration stopped at that analysis.",
+          "impact": "mixed evidence for feedback-driven iteration"
+        },
+        {
+          "location": "step 44",
+          "observation": "Appended a third test method to repro_complex.py but the runner still ran only 1 test; missing 'Query 3 count' output was not noticed. Several global pip installs were made into the container environment.",
+          "impact": "deduct for verification discipline"
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 9,
+      "max_score": 10,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 53",
+          "observation": "Removed all temporary repro scripts and the temporary tests/filtered_relation/test_fix.py before finishing.",
+          "impact": "clean submission state"
+        },
+        {
+          "location": "steps 55-56",
+          "observation": "patch.txt contains only a non-empty, source-file diff (django/db/models/sql/query.py) with correct `--- a/` / `+++ b/` headers; exact submit command `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt` returned 0.",
+          "impact": "patch is non-empty, applicable, and within designated source files"
+        },
+        {
+          "location": "final phase after cleanup",
+          "observation": "No `git status` or `git diff --check` was run before final submission, so cleanliness/whitespace state is inferred rather than audited.",
+          "impact": "minor audit deduction"
+        }
+      ]
+    }
+  },
+  "raw_total_score": 72,
+  "total_score": 72,
+  "evidence_confidence": "medium",
+  "caps_or_flags": [
+    "NO_BASELINE",
+    "KNOWN_COUNTEREXAMPLE"
+  ],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/db/models/sql/query.py"
+      ],
+      "patch_status": "non-empty, source-only patch; submitted via exact `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt`; contains one added line copying `_filtered_relations` into split_exclude inner query"
+    },
+    "timeline": [
+      "steps 3-6: locate query.py and filtered_relation tests",
+      "steps 7-11: build repro; install pytz/sqlparse; confirm pre-fix FieldError",
+      "steps 12-21: read Query.split_exclude / names_to_path / filtered-relation metadata",
+      "steps 22-25: insert `query._filtered_relations = self._filtered_relations.copy()` and rerun repro green",
+      "steps 26-37: several ad-hoc scripts and further source reading",
+      "steps 38-41: run filtered_relation suite and many_to_many/reverse_lookup with PYTHONPATH set",
+      "steps 42-46: multi-author main-case repro and annotation-related repros; step 44 added test never executed",
+      "steps 48-51: add temporary test_fix.py; original cases pass; M2M FilteredRelation exclude fails with no-such-column U5.title",
+      "steps 52-56: cleanup temp/test files, view diff, exact submit command"
+    ],
+    "environment": [
+      "/testbed Django source checkout with Python 3.11/miniconda, sqlite memory backend",
+      "missing pytz/sqlparse were installed globally with pip",
+      "tests/runtests.py requires PYTHONPATH=.; commands that omitted it caused ModuleNotFoundError then were corrected"
+    ],
+    "evidence_gaps": [
+      "Pre-fix red baseline: exception was swallowed by bare except inside the unittest; runner reported OK despite target FieldError",
+      "Discovered M2M FilteredRelation exclude counterexample (OperationalError no such column U5.title) was not fixed or reported in final submission; temp test deleted",
+      "No git status / git diff --check after cleanup and before final submission",
+      "No full-suite rerun after deleting temporary tests; hidden/grader scope unavailable"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "Author.objects.annotate(book_alice=FilteredRelation('book', condition=Q(book__title__iexact='poem by alice'))).exclude(book_alice__isnull=False) must not raise FieldError and must return only authors without a matching filtered book",
+      "Exclude lookups through the FilteredRelation alias (e.g., book_alice__title__icontains='...') should behave consistently with normal joins and not reference missing columns",
+      "Existing filter/annotate usages on FilteredRelation, including filter(book_alice__isnull=False), retain their current semantics"
+    ],
+    "negative_or_compatibility_behavior": [
+      "Non-FilteredRelation excludes and normal annotation excludes/HAVING behavior are unchanged",
+      "Existing filtered_relation, reverse_lookup and many_to_many test suites remain green",
+      "Generated SQL for excludes must be executable; no references to aliases that exist only in the outer query"
+    ],
+    "boundaries": [
+      "Exclude with no matched filtered book leaves the author in the result set",
+      "Multiple FilteredRelations and chained annotations over the same filtered relation",
+      "M2M / reverse relations used with FilteredRelation then exclude",
+      "isnull=False vs non-isnull lookups through the annotation-alias",
+      "Ordinary relation annotations already worked before the issue and are not targets of this bug"
+    ],
+    "forbidden_changes": [
+      "Tests, configuration files, reproduction/helper scripts must not be included in the final patch",
+      "Only source files fixing the behavior may be modified",
+      "Behavior of non-filtered exclude paths must not regress"
+    ],
+    "unknowns": [
+      "Grader/hidden-test scope for M2M FilteredRelation exclude is not observable from the trajectory",
+      "Correct general fix in upstream may require alias/relabeling or deeper state handling beyond copying `_filtered_relations`; not established here",
+      "Behavior on non-sqlite databases and across all supported relation types was not verified"
+    ]
+  },
+  "evidence_gaps": [
+    "Pre-fix red baseline: only a swallowed FieldError was visible; unittest status was OK (steps 7/11)",
+    "Deterministic M2M exclude counterexample (steps 49-50) is left unresolved and not contradicting the final submission because the failing test was deleted",
+    "No git status / git diff --check was run after cleanup",
+    "Cannot verify that final hidden tests covering M2M/en-alias scenarios would pass"
+  ],
+  "key_strengths": [
+    "Precise root-cause attribution to split_exclude inner Query missing `_filtered_relations`",
+    "Single-line minimal patch correctly fixes the reported FK/reverse-FK repro case",
+    "Runs the official filtered_relation suite and adjacent many_to_many/reverse_lookup suites",
+    "Clean temporary file removal and exact submission protocol"
+  ],
+  "key_risks": [
+    "Patch is a shallow copy of `_filtered_relations`; discovered M2M FilteredRelation exclude produces invalid SQL referencing aliases absent from the subquery",
+    "No true red failing test before the patch and no regression test added to final patch",
+    "Boundary/generality evidence is incomplete: agent hit a known counterexample, printed the SQL, then abandoned it",
+    "Final patch may be judged incomplete for related FilteredRelation relation types and alias relabeling not covered by reported issue"
+  ],
+  "conclusion": "The submitted patch plausibly fixes the exact reproduction reported in the issue and preserves current visible test suites for filtered_relation and related reverse/m2m paths. However, the trajectory itself exposes a deterministic counterexample of the same feature (M2M FilteredRelation exclude) that remains unfixed and unrecorded in the final submission, and the pre-fix failure was never turned into a proper failing test assertion. The change should not be considered a complete/general resolution for exclude-on-annotated-FilteredRelation until the discovered M2M and alias-relabeling cases are addressed and verified.",
+  "instance": "django__django-11265",
+  "submission": "20260217_mini-v2.0.0_gemini-3-flash-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-11265/20260217_mini-v2.0.0_gemini-3-flash-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788930893,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}

@@ -9,7 +9,7 @@
     python tools/build_arkts_bug_harbor_batch.py --max-repos 20 --model gpt-5.6-sol
     python tools/build_arkts_bug_harbor_batch.py <input.jsonl> --output-dir harbor_instances
 
-常用参数：--max-repos 限制处理数量，--skip-codex 跳过 Codex 测试生成，
+常用参数：--max-repos 限制处理数量，
 --output-dir 指定 instance 输出目录，--checkout-root 指定临时仓库目录。
 
 """
@@ -95,11 +95,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["read-only", "workspace-write", "danger-full-access"],
         default="workspace-write",
     )
-    parser.add_argument("--skip-codex", action="store_true")
-    parser.add_argument("--min-out-degree", type=int, default=1)
-    parser.add_argument("--min-consumers", type=int, default=0)
-    parser.add_argument("--min-downstream-dependencies", type=int, default=1)
-    parser.add_argument("--mutation-operator")
+    parser.add_argument("--min-upstream-direct-call-count", type=int, default=5)
     parser.add_argument("--keep-checkout", action="store_true")
     return parser
 
@@ -118,19 +114,11 @@ def _command(args: argparse.Namespace, full_name: str) -> list[str]:
         args.codex_cli,
         "--codex-sandbox",
         args.codex_sandbox,
-        "--min-out-degree",
-        str(args.min_out_degree),
-        "--min-consumers",
-        str(args.min_consumers),
-        "--min-downstream-dependencies",
-        str(args.min_downstream_dependencies),
+        "--min-upstream-direct-call-count",
+        str(args.min_upstream_direct_call_count),
     ]
     if args.model:
         command.extend(["--model", args.model])
-    if args.mutation_operator:
-        command.extend(["--mutation-operator", args.mutation_operator])
-    if args.skip_codex:
-        command.append("--skip-codex")
     if args.keep_checkout:
         command.append("--keep-checkout")
     return command
@@ -141,14 +129,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_repos < 1:
         print("error: --max-repos must be positive", file=sys.stderr)
         return 1
-    if args.min_out_degree < 1 or args.min_downstream_dependencies < 1:
+    if args.min_upstream_direct_call_count < 1:
         print(
-            "error: --min-out-degree and --min-downstream-dependencies must be positive",
+            "error: --min-upstream-direct-call-count must be positive",
             file=sys.stderr,
         )
-        return 1
-    if args.min_consumers < 0:
-        print("error: --min-consumers must not be negative", file=sys.stderr)
         return 1
     if not args.input.is_file():
         print(f"error: input JSONL does not exist: {args.input}", file=sys.stderr)

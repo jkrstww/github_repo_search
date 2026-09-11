@@ -16,11 +16,9 @@
     --output-dir：实例输出目录，默认是 harbor_instances/。
     --checkout-root：临时仓库 checkout 根目录，默认是 .tmp/arkts-harbor-checkouts/。
     --instance-id：实例 ID 前缀；脚本会追加 _0 和 _1。
-    --skip-codex：跳过自动调用 Codex 生成回归测试，适合仅构建任务骨架。
     --list-candidates：只将符合筛选条件的候选函数以 JSON 输出到标准输出，
         不创建 Harbor 实例。
-    --min-out-degree、--min-consumers、--min-downstream-dependencies、
-    --mutation-operator：候选函数筛选条件。
+    --min-upstream-direct-call-count：候选函数复杂度筛选条件。
 
 语法树来源与作用：
     --syntax-tree 不是第二个仓库，而是语法树索引 JSONL 文件的路径。脚本先
@@ -42,9 +40,21 @@
     environment/Dockerfile 构建掩码后的仓库，tests/ 保存验证脚本和测试补丁，
     solution/ 保存标准答案及其执行脚本。候选列表模式只输出 JSON，不写实例。
 
-候选分析、排序、语法树生成和掩码规则复用
-:mod:`tools.build_arkts_bug_mask_instance`；每个选中的函数都在独立 checkout
-中处理，以避免不同 Harbor 实例之间相互影响。
+候选分析由 :mod:`tools.filter_complex_arkts_functions` 提供；仓库准备、语法树
+生成和函数掩码均在本脚本内独立实现。每个选中的函数都在独立 checkout 中
+处理，以避免不同 Harbor 实例之间相互影响。
+
+执行顺序：
+
+    main
+      -> _prepare_repository       # clone、语法树、提交号
+      -> _select_candidates        # 基础候选 + 调用图筛选
+      -> _build_instances          # 选择前两个候选
+           -> _build_instance      # 每个候选的完整构建流程
+                -> _generate_test  # Codex 生成测试
+                -> _verify_test    # 掩码失败、标准答案通过
+                -> _write_instance # 写入 Harbor 文件树
+      -> finally: 删除临时 checkout（除非 --keep-checkout）
 """
 
 from __future__ import annotations
@@ -52,9 +62,14 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
+import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -67,12 +82,36 @@ INSTANCE_COUNT = 2
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from arkts_syntax_tree import DEFAULT_MUTATION_OPERATORS  # noqa: E402
-from tools import build_arkts_bug_mask_instance as mask  # noqa: E402
+from arkts_syntax_tree import parse_repository, write_syntax_tree_outputs  # noqa: E402
+from tools.filter_complex_arkts_functions import find_complex_function_candidates  # noqa: E402
 from tools.track_agent import capture_patch, run_agent  # noqa: E402
 
 
+@dataclass(frozen=True)
+class InstanceArtifacts:
+    """Generated content that is persisted in one Harbor instance."""
+
+    error_patch: str
+    gold_patch: str
+    test_patch: str
+    test_source: str
+
+
+@dataclass(frozen=True)
+class RepositoryContext:
+    """仓库准备阶段产出的共享上下文，供筛选和实例构建复用。"""
+
+    repo: Path
+    checkout: Path
+    repo_url: str
+    repo_name: str
+    metadata_repo: str
+    commit: str
+    syntax_tree: Path
+
+
 def _run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """在指定 checkout 中执行命令，并始终捕获其输出供上层报错使用。"""
     return subprocess.run(
         command,
         cwd=cwd,
@@ -84,7 +123,95 @@ def _run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def positive_int(value: str) -> int:
+    """将命令行参数解析为正整数。"""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
+def _repo_details(repo: str) -> tuple[str, str, str]:
+    """规范化本地路径、Git URL 或 owner/name，并给出元数据仓库名。"""
+    raw = repo.strip().rstrip("/")
+    if not raw:
+        raise ValueError("repository name must not be empty")
+    local = Path(raw).expanduser()
+    if local.is_dir() and (local / ".git").is_dir():
+        resolved = local.resolve()
+        remote = _run(["git", "config", "--get", "remote.origin.url"], resolved).stdout.strip()
+        metadata = remote.removesuffix(".git").split("github.com/")[-1] if "github.com/" in remote else resolved.name
+        return str(resolved), resolved.name, metadata
+    if raw.startswith("git@") or "://" in raw:
+        return raw, Path(raw.rsplit("/", 1)[-1]).stem or "repository", raw.removesuffix(".git")
+    normalized = raw.removesuffix(".git")
+    return f"https://github.com/{normalized}.git", normalized.rsplit("/", 1)[-1], normalized
+
+
+def _remove_tree(path: Path) -> None:
+    """删除临时 checkout，并处理 Git 产生的只读文件。"""
+    def retry(function: Any, name: str, error: Any) -> None:
+        """将失败目标设为可写后重试 shutil 的删除操作。"""
+        del error
+        os.chmod(name, stat.S_IWRITE)
+        function(name)
+    shutil.rmtree(path, onerror=retry)
+
+
+def _clone(repo: str, destination: Path) -> tuple[Path, str]:
+    """将仓库 clone 到专用临时目录。"""
+    url, _, metadata_repo = _repo_details(repo)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        _remove_tree(destination)
+    result = _run(["git", "clone", url, str(destination)], PROJECT_ROOT)
+    if result.returncode:
+        raise RuntimeError(result.stderr or result.stdout or "git clone failed")
+    return destination, metadata_repo
+
+
+def _ensure_syntax_tree(repo: Path, path: Path) -> None:
+    """生成缺失的 ArkTS 语法树 JSONL。"""
+    if path.is_file():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parsed = parse_repository(repo, extensions=[".ets", ".ts"])
+    write_syntax_tree_outputs(parsed, output_path=path, summary_path=path.with_name(path.stem + "_summary.json"))
+
+
+def _checkpoint_mask(repo: Path) -> None:
+    """提交掩码后的代码，作为 Codex 创建测试时的 Git 基线。"""
+    add = _run(["git", "add", "-A"], repo)
+    commit = _run(["git", "commit", "-m", "Masked task baseline"], repo)
+    if add.returncode or commit.returncode:
+        raise RuntimeError(add.stderr or add.stdout or commit.stderr or commit.stdout or "cannot checkpoint masked checkout")
+
+
+def _mask_function(source: str, function: Any) -> str:
+    """清空目标函数体，同时保留声明、缩进和行尾风格。"""
+    lines = source.splitlines(keepends=True)
+    start, end = function.start_line - 1, function.end_line - 1
+    if start < 0 or end >= len(lines) or end < start:
+        raise ValueError(f"invalid source range for {function.identity}")
+    first = lines[start]
+    open_brace = first.find("{")
+    if open_brace < 0:
+        raise ValueError(f"function declaration has no opening brace: {function.identity}")
+    ending = "\r\n" if first.endswith("\r\n") else "\n"
+    declaration = first[:open_brace + 1].rstrip("\r\n")
+    if start == end:
+        replacement = [declaration + "}" + ending]
+    else:
+        suffix = lines[end][lines[end].rfind("}"):] if "}" in lines[end] else "}" + ending
+        replacement = [declaration + ending, re.match(r"\s*", first).group(0) + suffix.lstrip()]
+    masked = "".join(lines[:start] + replacement + lines[end + 1:])
+    if masked == source:
+        raise ValueError(f"mask did not change {function.identity}")
+    return masked
+
+
 def _make_patch(before: str, after: str, relative_path: str) -> str:
+    """为单个仓库内文件生成带 Git 路径前缀的统一 diff。"""
     diff = difflib.unified_diff(
         before.splitlines(keepends=True),
         after.splitlines(keepends=True),
@@ -103,51 +230,14 @@ def _make_patch(before: str, after: str, relative_path: str) -> str:
     return result if result.endswith("\n") else result + "\n"
 
 
-def _mask_functions(repo: Path, functions: list[Any]) -> tuple[str, str]:
-    """Mask all functions, processing each file bottom-up to preserve ranges.
-
-    Syntax-tree catalogs may include both a function and nested functions such as
-    a ``describe`` callback.  Replacing the nested range first changes the line
-    numbers used by the enclosing function, so nested candidates are covered by
-    masking their outermost candidate once.
-    """
-    originals: dict[str, str] = {}
-    masked: dict[str, str] = {}
-    for function in functions:
-        if function.path not in originals:
-            path = repo / function.path
-            with path.open("r", encoding="utf-8", errors="replace", newline="") as source_file:
-                originals[function.path] = source_file.read()
-            masked[function.path] = originals[function.path]
-
-    targets: list[Any] = []
-    for function in functions:
-        contained = any(
-            other is not function
-            and other.path == function.path
-            and other.start_line <= function.start_line
-            and function.end_line <= other.end_line
-            and (other.start_line < function.start_line or function.end_line < other.end_line)
-            for other in functions
-        )
-        if not contained:
-            targets.append(function)
-
-    for function in sorted(targets, key=lambda item: (item.path, -item.start_line)):
-        masked_source, _ = mask._mask_function(masked[function.path], function)
-        masked[function.path] = masked_source
-
-    error_parts: list[str] = []
-    gold_parts: list[str] = []
-    for path in sorted(originals):
-        error_parts.append(_make_patch(originals[path], masked[path], path))
-        gold_parts.append(_make_patch(masked[path], originals[path], path))
-        (repo / path).write_text(masked[path], encoding="utf-8", newline="")
-    return "".join(error_parts), "".join(gold_parts)
+def _read_source(path: Path) -> str:
+    """读取源码且保留原始换行符，避免补丁行号或内容发生意外变化。"""
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as source_file:
+        return source_file.read()
 
 
 def _reset_checkout(repo: Path, commit: str) -> None:
-    """Restore a checkout to the original commit before building the next instance."""
+    """在构建下一个实例前，将共享 checkout 恢复到指定提交且清理未跟踪文件。"""
     reset = _run(["git", "reset", "--hard", commit], repo)
     if reset.returncode:
         raise RuntimeError(reset.stderr or reset.stdout or "cannot reset checkout")
@@ -156,93 +246,40 @@ def _reset_checkout(repo: Path, commit: str) -> None:
         raise RuntimeError(clean.stderr or clean.stdout or "cannot clean checkout")
 
 
-def _fallback_test(functions: list[Any], originals: dict[str, str]) -> str:
-    if len(functions) == 1 and functions[0].path.endswith("entry/src/ohosTest/ets/test/Ability.test.ets"):
-        return _hypium_runtime_test(functions[0])
-    del originals
-    raise RuntimeError(
-        "--skip-codex has no behavioral fallback for this function; "
-        "run with Codex to generate a focused test"
-    )
+def _test_prompt(function: Any) -> str:
+    """构造发给 Codex 的单目标回归测试生成指令。"""
+    target = f"- `{function.qualified_name}` in `{function.path}` (currently empty)"
+    return f"""This ArkTS repository has this deliberately masked function:
+{target}
 
+Create a focused deterministic test file at exactly `{TEST_PATH}`. The test must
+execute the target function and verify its observable behavior, not compare the
+complete expected source text or merely check that a body is non-empty. Do not
+copy the missing production implementation into the test — the test must FAIL
+against the masked, empty version and only PASS once the real implementation is
+restored.
 
-def _hypium_runtime_test(function: Any) -> str:
-    """Exercise the generated Hypium registration function through a Node VM.
+For the Hypium ability test, use a Node.js VM harness with mocks for describe,
+beforeAll, beforeEach, afterEach, afterAll, it, expect, and hilog, then assert
+the registered suite, lifecycle hooks, test case, log call, and assertion calls.
+Use only Python's standard library plus pytest and Node.js already available in
+the environment.
 
-    The harness removes only the import/export syntax from this test-oriented
-    ArkTS file and supplies small Hypium/Hilog doubles.  It then executes the
-    exported function, so an empty or incomplete masked body fails for semantic
-    reasons rather than because expected source text is missing.
-    """
-    del function
-    return r'''import json
-import subprocess
-from pathlib import Path
-
-
-def test_ability_registration_runtime():
-    source_path = Path(__file__).resolve().parents[1] / "entry/src/ohosTest/ets/test/Ability.test.ets"
-    source = source_path.read_text(encoding="utf-8")
-    payload = json.dumps(source)
-    script = r"""
-const vm = require("vm");
-const source = JSON.parse(process.argv[1])
-  .replace(/^import[^\n]*\n/gm, "")
-  .replace("export default function", "function");
-const events = { suites: [], hooks: [], cases: [], logs: [], assertions: [] };
-const context = {
-  describe(name, callback) {
-    const suite = { name, hooks: [], cases: [] };
-    events.suites.push(suite);
-    callback();
-  },
-  beforeAll(callback) { events.hooks.push("beforeAll"); callback(); },
-  beforeEach(callback) { events.hooks.push("beforeEach"); callback(); },
-  afterEach(callback) { events.hooks.push("afterEach"); callback(); },
-  afterAll(callback) { events.hooks.push("afterAll"); callback(); },
-  it(name, filter, callback) {
-    events.cases.push({ name, filter });
-    callback();
-  },
-  hilog: { info(...args) { events.logs.push(args); } },
-  expect(value) {
-    return {
-      assertContain(other) {
-        if (!String(value).includes(String(other))) throw new Error("assertContain failed");
-        events.assertions.push("contain");
-      },
-      assertEqual(other) {
-        if (value !== other) throw new Error("assertEqual failed");
-        events.assertions.push("equal");
-      },
-    };
-  },
-  module: { exports: {} },
-};
-vm.runInNewContext(source + "\nmodule.exports = abilityTest;", context);
-if (typeof context.module.exports !== "function") throw new Error("abilityTest was not exported");
-context.module.exports();
-if (events.suites.length !== 1 || events.suites[0].name !== "ActsAbilityTest") throw new Error("suite registration is incomplete");
-if (JSON.stringify(events.hooks) !== JSON.stringify(["beforeAll", "beforeEach", "afterEach", "afterAll"])) throw new Error("lifecycle hooks are incomplete");
-if (events.cases.length !== 1 || events.cases[0].name !== "assertContain" || events.cases[0].filter !== 0) throw new Error("assertion case is incomplete");
-if (events.logs.length !== 1 || events.logs[0][0] !== 0x0000 || events.logs[0][1] !== "testTag") throw new Error("test logging is incomplete");
-if (JSON.stringify(events.assertions) !== JSON.stringify(["contain", "equal"])) throw new Error("assertions were not executed");
+Write the test into `{TEST_PATH}`; any extra helper modules, stubs, or fixtures
+should also live under `tests/` and stay self-contained (no network access).
+These two hard rules must hold regardless of approach:
+1. Do NOT edit, restore, or otherwise change `{function.path}` — the masked
+   function's own source file. You may read it read-only to understand its shape
+   and signature, but leave it exactly as the masked baseline leaves it.
+2. Do NOT modify other production source code to make the test pass; drive the
+   masked behavior through the public API as-is. Existing test entry files under
+   `entry/src/ohosTest/` may be read or minimally adjusted only if strictly needed
+   to execute the VM harness.
 """
-    result = subprocess.run(["node", "-e", script, payload], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr or result.stdout
-'''
-
-
-def _test_prompt(functions: list[Any], originals: dict[str, str]) -> str:
-    targets = "\n".join(
-        f"- `{function.qualified_name}` in `{function.path}` (currently empty)"
-        for function in functions
-    )
-    del originals
-    return f"""This ArkTS repository has these deliberately masked functions:\n{targets}\n\nCreate a focused deterministic test file at exactly `{TEST_PATH}`. The test must execute the target function and verify its observable behavior, not compare the complete expected source text or merely check that a body is non-empty. Do not copy the missing production implementation into the test. For the Hypium ability test, use a Node.js VM harness with mocks for describe, beforeAll, beforeEach, afterEach, afterAll, it, expect, and hilog, then assert the registered suite, lifecycle hooks, test case, log call, and assertion calls. Use only Python's standard library plus pytest and Node.js already available in the environment. Only create or modify `{TEST_PATH}`.\n"""
 
 
 def _changed_paths(repo: Path) -> set[str]:
+    """返回相对 HEAD 有改动或新增的所有未忽略路径。"""
     diff = _run(["git", "diff", "--name-only", "HEAD", "--"], repo)
     others = _run(["git", "ls-files", "--others", "--exclude-standard"], repo)
     if diff.returncode or others.returncode:
@@ -250,25 +287,35 @@ def _changed_paths(repo: Path) -> set[str]:
     return {line.strip().replace("\\", "/") for line in (diff.stdout + others.stdout).splitlines() if line.strip()}
 
 
-def _generate_test(repo: Path, functions: list[Any], originals: dict[str, str], args: argparse.Namespace, track_dir: Path, task_id: str) -> str:
-    if args.skip_codex:
-        test = repo / TEST_PATH
-        test.parent.mkdir(parents=True, exist_ok=True)
-        test.write_text(_fallback_test(functions, originals), encoding="utf-8")
-    else:
-        _, code = run_agent(
-            workspace=repo,
-            agent=args.codex_cli,
-            model=args.model,
-            task_id=f"{task_id}_tests",
-            output_dir=track_dir,
-            prompt=_test_prompt(functions, originals),
-            extra_args=["--sandbox", args.codex_sandbox],
+def _generate_test(
+    repo: Path,
+    function: Any,
+    args: argparse.Namespace,
+    track_dir: Path,
+    task_id: str,
+) -> str:
+    """调用 Codex 生成测试，并强制其只修改 ``TEST_PATH``。"""
+    _, code = run_agent(
+        workspace=repo,
+        agent=args.codex_cli,
+        model=args.model,
+        task_id=f"{task_id}_tests",
+        output_dir=track_dir,
+        prompt=_test_prompt(function),
+        extra_args=["--sandbox", args.codex_sandbox],
+    )
+    if code != 0:
+        raise RuntimeError("Codex test generation failed")
+    changed_paths = _changed_paths(repo)
+    # The masked function's own source file is off-limits: editing it would
+    # collide with the gold patch at eval time (both rewrite the masked body) and
+    # risks leaking the solution through a partial stub. Beyond that restriction
+    # codex is free to add helper files (placed under tests/) so it can run the
+    # harness without being artificially limited to a single test file.
+    if function.path in changed_paths:
+        raise RuntimeError(
+            f"Codex modified the masked function's source file: {function.path}"
         )
-        if code != 0:
-            raise RuntimeError("Codex test generation failed")
-    if _changed_paths(repo) != {TEST_PATH}:
-        raise RuntimeError(f"Codex must change only {TEST_PATH}")
     patch = capture_patch(repo)
     if not patch.strip():
         raise RuntimeError("Codex produced an empty test patch")
@@ -276,6 +323,7 @@ def _generate_test(repo: Path, functions: list[Any], originals: dict[str, str], 
 
 
 def _apply_patch(repo: Path, patch: str) -> None:
+    """先校验、再应用标准答案补丁；无论结果如何都删除临时补丁文件。"""
     patch_file = repo.parent / ".arkts-gold.patch"
     patch_file.write_text(patch, encoding="utf-8", newline="")
     try:
@@ -290,6 +338,7 @@ def _apply_patch(repo: Path, patch: str) -> None:
 
 
 def _verify_test(repo: Path, gold_patch: str) -> None:
+    """验证测试在掩码代码上失败、在恢复标准答案后通过。"""
     masked = _run([sys.executable, "-m", "pytest", "-q", TEST_PATH], repo)
     if masked.returncode == 0:
         raise RuntimeError("generated test passes against masked functions")
@@ -300,10 +349,12 @@ def _verify_test(repo: Path, gold_patch: str) -> None:
 
 
 def _shell_patch(patch: str) -> str:
+    """生成在 Harbor 容器内应用标准答案补丁的 shell 脚本。"""
     return "#!/bin/bash\nset -euo pipefail\ncd \"$(git rev-parse --show-toplevel)\"\npatch -p1 <<'__ARKTS_GOLD_PATCH__'\n" + patch + "__ARKTS_GOLD_PATCH__\n"
 
 
 def _dockerfile(repo_url: str, commit: str) -> str:
+    """生成包含掩码仓库和运行测试依赖的双阶段 Dockerfile。"""
     safe_url = repo_url.replace("\\", "\\\\").replace('"', '\\"')
     return f"""FROM node:20-slim AS masked-repo
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git patch \\
@@ -331,6 +382,7 @@ WORKDIR /workspace/repo
 
 
 def _docker_compose() -> str:
+    """生成 Harbor 所需的最小 Compose 服务定义。"""
     return """services:
   main: {}
 """
@@ -341,7 +393,7 @@ def _key_words(
     graph: dict[str, set[str]],
     catalog: dict[str, Any],
 ) -> list[str]:
-    """Return the target's immediate repository dependents and dependencies."""
+    """返回目标函数的直接调用方和被调用方名称，供实例元数据检索使用。"""
     direct_dependents = sorted(
         caller
         for caller, callees in graph.items()
@@ -357,31 +409,41 @@ def _key_words(
     )
 
 
-def _write_instance(destination: Path, *, repo_url: str, commit: str, metadata_repo: str, functions: list[Any], key_words: list[str], error_patch: str, gold_patch: str, test_patch: str, test_source: str) -> None:
+def _write_instance(
+    destination: Path,
+    *,
+    repo_url: str,
+    commit: str,
+    metadata_repo: str,
+    function: Any,
+    key_words: list[str],
+    artifacts: InstanceArtifacts,
+) -> None:
+    """将任务说明、补丁、测试、环境定义和元数据写入实例目录。"""
     destination.mkdir(parents=True)
     instruction = (
         "Restore the complete implementation of the following ArkTS function. Preserve its public declaration and surrounding code, and make all tests pass:\n\n"
-        + "\n".join(f"- `{item.qualified_name}` in `{item.path}`" for item in functions)
+        + f"- `{function.qualified_name}` in `{function.path}`"
         + "\n\n"
         + "## Restrictions\n\n"
         + "- Do not use external network or remote Git resources to search for the solution. This includes git clone, git fetch, git pull, git remote, GitHub/GitLab APIs, web search, curl, wget, Python/Node HTTP requests, and any equivalent tool or command.\n"
         + "- Do not inspect benchmark answer artifacts or agent/session logs outside the repository working tree, including error.patch, gold.patch, /tmp, or Codex session files. Recover the implementation only from the checked-out repository, its local history, and the task context.\n"
     )
     (destination / "instruction.md").write_text(instruction, encoding="utf-8")
-    (destination / "error.patch").write_text(error_patch, encoding="utf-8", newline="")
+    (destination / "error.patch").write_text(artifacts.error_patch, encoding="utf-8", newline="")
     (destination / "tests").mkdir()
-    (destination / "tests" / "test_outputs.py").write_text(test_source, encoding="utf-8")
-    (destination / "tests" / "test.patch").write_text(test_patch, encoding="utf-8", newline="")
-    (destination / "tests" / "f2p_patch.diff").write_text(test_patch, encoding="utf-8", newline="")
+    (destination / "tests" / "test_outputs.py").write_text(artifacts.test_source, encoding="utf-8")
+    (destination / "tests" / "test.patch").write_text(artifacts.test_patch, encoding="utf-8", newline="")
+    (destination / "tests" / "f2p_patch.diff").write_text(artifacts.test_patch, encoding="utf-8", newline="")
     (destination / "solution").mkdir()
-    (destination / "solution" / "gold.patch").write_text(gold_patch, encoding="utf-8", newline="")
-    (destination / "solution" / "gold_patch.diff").write_text(gold_patch, encoding="utf-8", newline="")
-    (destination / "solution" / "solve.sh").write_text(_shell_patch(gold_patch), encoding="utf-8", newline="")
+    (destination / "solution" / "gold.patch").write_text(artifacts.gold_patch, encoding="utf-8", newline="")
+    (destination / "solution" / "gold_patch.diff").write_text(artifacts.gold_patch, encoding="utf-8", newline="")
+    (destination / "solution" / "solve.sh").write_text(_shell_patch(artifacts.gold_patch), encoding="utf-8", newline="")
     (destination / "solution" / "solve.sh").chmod(0o755)
     (destination / "environment").mkdir()
     (destination / "environment" / "Dockerfile").write_text(_dockerfile(repo_url, commit), encoding="utf-8")
     (destination / "environment" / "docker-compose.yaml").write_text(_docker_compose(), encoding="utf-8")
-    (destination / "environment" / "error.patch").write_text(error_patch, encoding="utf-8", newline="")
+    (destination / "environment" / "error.patch").write_text(artifacts.error_patch, encoding="utf-8", newline="")
     (destination / "tests" / "test.sh").write_text(
         "#!/bin/bash\nset -uo pipefail\ncd /workspace/repo\ngit apply --check /tests/f2p_patch.diff && git apply /tests/f2p_patch.diff\npython -m pytest -q tests/test_outputs.py\ncode=$?\nmkdir -p /logs/verifier\nif [ $code -eq 0 ]; then echo 1 > /logs/verifier/reward.txt; else echo 0 > /logs/verifier/reward.txt; fi\nexit 0\n",
         encoding="utf-8",
@@ -396,14 +458,169 @@ def _write_instance(destination: Path, *, repo_url: str, commit: str, metadata_r
         "task_type": "arkts_function_restore",
         "repo": metadata_repo,
         "commit": commit,
-        "functions": [item.to_dict() for item in functions],
+        "functions": [function.to_dict()],
         "key_words": key_words,
         "patches": {"error": "error.patch", "gold": "solution/gold_patch.diff", "test": "tests/f2p_patch.diff"},
     }
     (destination / "instance.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _candidate_records(
+    eligible: list[tuple[Any, int]],
+    graph: dict[str, set[str]],
+    catalog: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """序列化候选函数详情，作为 ``--list-candidates`` 的 JSON 输出。"""
+    return [
+        candidate.to_dict()
+        | {
+            "upstream_direct_call_count": dependency_count,
+            "key_words": _key_words(candidate.function, graph, catalog),
+        }
+        for candidate, dependency_count in eligible
+    ]
+
+
+def _build_instance(
+    repo: Path,
+    *,
+    candidate: Any,
+    destination: Path,
+    instance_id: str,
+    commit: str,
+    repo_url: str,
+    metadata_repo: str,
+    graph: dict[str, set[str]],
+    catalog: dict[str, Any],
+    args: argparse.Namespace,
+    track_dir: Path,
+) -> None:
+    """掩码一个函数、生成并验证其测试，再写入完整 Harbor 实例。"""
+    function = candidate.function
+    _reset_checkout(repo, commit)
+
+    target_path = repo / function.path
+    original_source = _read_source(target_path)
+    masked_source = _mask_function(original_source, function)
+    error_patch = _make_patch(original_source, masked_source, function.path)
+    gold_patch = _make_patch(masked_source, original_source, function.path)
+    target_path.write_text(masked_source, encoding="utf-8", newline="")
+    _checkpoint_mask(repo)
+
+    test_patch = _generate_test(repo, function, args, track_dir, instance_id)
+    _verify_test(repo, gold_patch)
+    generated_test = repo / TEST_PATH
+    if not generated_test.is_file():
+        raise RuntimeError(f"Codex did not create {TEST_PATH}")
+
+    _write_instance(
+        destination,
+        repo_url=repo_url,
+        commit=commit,
+        metadata_repo=metadata_repo,
+        function=function,
+        key_words=_key_words(function, graph, catalog),
+        artifacts=InstanceArtifacts(
+            error_patch=error_patch,
+            gold_patch=gold_patch,
+            test_patch=test_patch,
+            test_source=generated_test.read_text(encoding="utf-8"),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Top-level orchestration: repository -> candidates -> Harbor instances
+# ---------------------------------------------------------------------------
+
+def _prepare_repository(
+    args: argparse.Namespace,
+    *,
+    repo_url: str,
+    repo_name: str,
+    checkout: Path,
+) -> RepositoryContext:
+    """克隆仓库、生成或读取语法树，并记录本次构建使用的提交号。"""
+    syntax_tree = (
+        args.syntax_tree
+        or args.checkout_root.resolve() / f"{repo_name}_syntax_tree.jsonl"
+    ).resolve()
+    repo, metadata_repo = _clone(args.repo, checkout)
+    if args.syntax_tree is None:
+        syntax_tree.unlink(missing_ok=True)
+    _ensure_syntax_tree(repo, syntax_tree)
+
+    head = _run(["git", "rev-parse", "HEAD"], repo)
+    if head.returncode:
+        raise RuntimeError(head.stderr or head.stdout or "cannot read repository HEAD")
+    return RepositoryContext(
+        repo=repo,
+        checkout=checkout,
+        repo_url=repo_url,
+        repo_name=repo_name,
+        metadata_repo=metadata_repo,
+        commit=head.stdout.strip(),
+        syntax_tree=syntax_tree,
+    )
+
+
+def _select_candidates(
+    context: RepositoryContext,
+    args: argparse.Namespace,
+) -> tuple[list[tuple[Any, int]], dict[str, set[str]], dict[str, Any]]:
+    """按 CLI 阈值筛选候选函数，并返回它们的调用图和函数目录。"""
+    candidates, graph, catalog = find_complex_function_candidates(
+        context.repo,
+        context.syntax_tree,
+        min_upstream_direct_call_count=args.min_upstream_direct_call_count,
+    )
+    return [
+        (candidate, candidate.upstream_direct_call_count)
+        for candidate in candidates
+    ], graph, catalog
+
+
+def _build_instances(
+    context: RepositoryContext,
+    eligible: list[tuple[Any, int]],
+    graph: dict[str, set[str]],
+    catalog: dict[str, Any],
+    args: argparse.Namespace,
+) -> None:
+    """使用排序靠前的两个候选函数，分别构造独立的 Harbor 实例。"""
+    if len(eligible) < INSTANCE_COUNT:
+        raise ValueError(
+            f"expected at least {INSTANCE_COUNT} eligible functions, found {len(eligible)}"
+        )
+
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_id = args.instance_id or f"{context.repo_name}_arkts_masked_functions"
+    with tempfile.TemporaryDirectory(prefix="arkts-harbor-", dir=output_dir) as temp:
+        track_dir = Path(temp) / "tracks"
+        for index, (candidate, _) in enumerate(eligible[:INSTANCE_COUNT]):
+            instance_id = f"{base_id}_{index}"
+            destination = output_dir / instance_id
+            if destination.exists():
+                raise FileExistsError(f"instance already exists: {destination}")
+            _build_instance(
+                context.repo,
+                candidate=candidate,
+                destination=destination,
+                instance_id=instance_id,
+                commit=context.commit,
+                repo_url=context.repo_url,
+                metadata_repo=context.metadata_repo,
+                graph=graph,
+                catalog=catalog,
+                args=args,
+                track_dir=track_dir,
+            )
+            print(f"instance={instance_id}\npath={destination}")
+
+
 def build_parser() -> argparse.ArgumentParser:
+    """定义 Harbor 单仓库实例构造器的命令行参数。"""
     parser = argparse.ArgumentParser(description="Build two Harbor ArkTS function-restoration tasks")
     parser.add_argument("--repo", required=True, help="GitHub owner/name, URL, or local Git repository")
     parser.add_argument("--syntax-tree", type=Path)
@@ -413,93 +630,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-cli", default="codex")
     parser.add_argument("--model")
     parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default="workspace-write")
-    parser.add_argument("--min-out-degree", type=mask.positive_int, default=1)
-    parser.add_argument("--min-consumers", type=mask.nonnegative_int, default=0)
-    parser.add_argument("--min-downstream-dependencies", type=mask.positive_int, default=1)
-    parser.add_argument("--mutation-operator", choices=DEFAULT_MUTATION_OPERATORS)
+    parser.add_argument("--min-upstream-direct-call-count", type=positive_int, default=5)
     parser.add_argument("--list-candidates", action="store_true", help="print the ordered eligible functions and exit")
-    parser.add_argument("--skip-codex", action="store_true")
     parser.add_argument("--keep-checkout", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    """按“准备仓库 → 筛选候选 → 构建实例”的顺序执行整个命令。"""
     args = build_parser().parse_args(argv)
-    _, repo_name, metadata_repo = mask._repo_details(args.repo)
+    repo_url, repo_name, _ = _repo_details(args.repo)
     checkout = args.checkout_root.resolve() / repo_name
-    syntax_tree = (args.syntax_tree or args.checkout_root.resolve() / f"{repo_name}_syntax_tree.jsonl").resolve()
     try:
-        repo, metadata_repo = mask._clone(args.repo, checkout)
-        if args.syntax_tree is None:
-            syntax_tree.unlink(missing_ok=True)
-        mask._ensure_syntax_tree(repo, syntax_tree)
-        head = _run(["git", "rev-parse", "HEAD"], repo)
-        if head.returncode:
-            raise RuntimeError(head.stderr or head.stdout)
-        commit = head.stdout.strip()
-        eligible, graph, catalog = mask._eligible_candidates(repo, syntax_tree, min_out_degree=args.min_out_degree, min_consumers=args.min_consumers, mutation_operator=args.mutation_operator, min_downstream_dependencies=args.min_downstream_dependencies)
+        context = _prepare_repository(
+            args,
+            repo_url=repo_url,
+            repo_name=repo_name,
+            checkout=checkout,
+        )
+        eligible, graph, catalog = _select_candidates(context, args)
         if args.list_candidates:
-            print(json.dumps([
-                candidate.to_dict()
-                | {
-                    "downstream_dependency_count": dependency_count,
-                    "key_words": _key_words(candidate.function, graph, catalog),
-                }
-                for candidate, dependency_count in eligible
-            ], ensure_ascii=False, indent=2))
+            print(json.dumps(_candidate_records(eligible, graph, catalog), ensure_ascii=False, indent=2))
             return 0
-        if len(eligible) < INSTANCE_COUNT:
-            raise ValueError(f"expected at least {INSTANCE_COUNT} eligible functions, found {len(eligible)}")
-        args.output_dir.resolve().mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="arkts-harbor-", dir=args.output_dir.resolve()) as temp:
-            base_id = args.instance_id or f"{repo_name}_arkts_masked_functions"
-            output_url, _, _ = mask._repo_details(args.repo)
-            for index, (candidate, _) in enumerate(eligible[:INSTANCE_COUNT]):
-                function = candidate.function
-                instance_id = f"{base_id}_{index}"
-                destination = args.output_dir.resolve() / instance_id
-                if destination.exists():
-                    raise FileExistsError(f"instance already exists: {destination}")
-
-                _reset_checkout(repo, commit)
-                target_path = repo / function.path
-                with target_path.open("r", encoding="utf-8", errors="replace", newline="") as source_file:
-                    original_source = source_file.read()
-                masked_source, _ = mask._mask_function(original_source, function)
-                error_patch = _make_patch(original_source, masked_source, function.path)
-                gold_patch = _make_patch(masked_source, original_source, function.path)
-                target_path.write_text(masked_source, encoding="utf-8", newline="")
-                mask._checkpoint_mask(repo)
-
-                originals = {function.path: original_source}
-                test_patch = _generate_test(
-                    repo, [function], originals, args, Path(temp) / "tracks", instance_id
-                )
-                _verify_test(repo, gold_patch)
-                generated_test = repo / TEST_PATH
-                if not generated_test.is_file():
-                    raise RuntimeError(f"Codex did not create {TEST_PATH}")
-                test_source = generated_test.read_text(encoding="utf-8")
-                _write_instance(
-                    destination,
-                    repo_url=output_url,
-                    commit=commit,
-                    metadata_repo=metadata_repo,
-                    functions=[function],
-                    key_words=_key_words(function, graph, catalog),
-                    error_patch=error_patch,
-                    gold_patch=gold_patch,
-                    test_patch=test_patch,
-                    test_source=test_source,
-                )
-                print(f"instance={instance_id}\npath={destination}")
+        _build_instances(context, eligible, graph, catalog, args)
         return 0
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:
         if checkout.exists() and not args.keep_checkout:
-            mask._remove_tree(checkout)
+            _remove_tree(checkout)
 
 
 if __name__ == "__main__":
