@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -87,3 +88,36 @@ def as_list(value: Any) -> list[Any]:
     if isinstance(value, tuple):
         return list(value)
     return [value]
+
+
+def load_env_value(name: str, path: str | Path = ".env") -> tuple[str | None, str | None]:
+    """Read one value from the process environment or a simple dotenv file.
+
+    Existing environment variables take precedence.  This keeps the root project
+    dependency-free while supporting the common KEY=value dotenv syntax.
+    """
+    value = os.environ.get(name)
+    if value:
+        return value.strip(), "environment"
+
+    env_path = Path(path)
+    try:
+        lines = env_path.read_text(encoding="utf-8-sig").splitlines()
+    except FileNotFoundError:
+        return None, None
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, raw_value = line.partition("=")
+        if not separator or key.strip() != name:
+            continue
+        dotenv_value = raw_value.strip()
+        if len(dotenv_value) >= 2 and dotenv_value[0] == dotenv_value[-1] and dotenv_value[0] in {"'", '"'}:
+            dotenv_value = dotenv_value[1:-1]
+        return (dotenv_value or None), str(env_path)
+
+    return None, None

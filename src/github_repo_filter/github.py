@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -321,7 +322,8 @@ def _request_json(
     request = urllib.request.Request(url, headers=headers)
     attempts = 5
     last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
+    attempt = 1
+    while attempt <= attempts:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
@@ -330,18 +332,29 @@ def _request_json(
             if attempt == attempts:
                 break
             time.sleep(min(2**attempt, 8))
+            attempt += 1
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             message = _extract_error_message(body) or exc.reason
             reset = exc.headers.get("X-RateLimit-Reset")
-            if exc.code == 403 and reset:
-                message = f"{message}; rate limit resets at {_format_epoch(reset)}"
+            wait_seconds = _rate_limit_wait_seconds(exc, message)
+            if wait_seconds is not None:
+                reset_message = f", reset at {_format_epoch(reset)}" if reset else ""
+                print(
+                    f"GitHub API rate limit reached{reset_message}; "
+                    f"waiting {wait_seconds:.0f} seconds before retrying",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(wait_seconds)
+                continue
             raise GitHubApiError(f"GitHub API error {exc.code}: {message}") from exc
         except urllib.error.URLError as exc:
             last_error = exc
             if attempt == attempts:
                 break
             time.sleep(min(2**attempt, 8))
+            attempt += 1
         except json.JSONDecodeError as exc:
             raise GitHubApiError("GitHub API returned invalid JSON") from exc
 
@@ -356,6 +369,33 @@ def _extract_error_message(body: str) -> str:
     except json.JSONDecodeError:
         return body.strip()
     return str(payload.get("message") or "").strip()
+
+
+def _rate_limit_wait_seconds(exc: urllib.error.HTTPError, message: str) -> float | None:
+    if exc.code not in {403, 429}:
+        return None
+
+    remaining = exc.headers.get("X-RateLimit-Remaining")
+    is_rate_limit = remaining == "0" or "rate limit" in message.casefold() or exc.code == 429
+    if not is_rate_limit:
+        return None
+
+    retry_after = exc.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(1.0, float(retry_after))
+        except ValueError:
+            pass
+
+    reset = exc.headers.get("X-RateLimit-Reset")
+    if reset:
+        try:
+            return max(1.0, int(reset) - time.time() + 1.0)
+        except (TypeError, ValueError):
+            pass
+
+    # GitHub secondary limits do not always include a reset timestamp.
+    return 60.0
 
 
 def _range_qualifier(field: str, lower: Any, upper: Any) -> str:

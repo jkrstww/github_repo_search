@@ -1,7 +1,7 @@
 """Build ArkTS function-restoration benchmark instances.
 
-The candidate pool and ordering match ``build_arkts_bug_instance.py``.  This
-variant selects the first two candidates, replaces each function body with an
+Candidates are selected from call-graph complexity rather than mutation sites.
+This variant selects the first two candidates, replaces each function body with an
 empty body, and asks Codex to create a focused ``test/test.py`` regression test.
 
 Example:
@@ -34,12 +34,7 @@ ALLOWED_TEST_PATH = "test/test.py"
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from arkts_syntax_tree import (  # noqa: E402
-    DEFAULT_MUTATION_OPERATORS,
-    find_bug_candidates,
-    parse_repository,
-    write_syntax_tree_outputs,
-)
+from arkts_syntax_tree import parse_repository, write_syntax_tree_outputs  # noqa: E402
 from arkts_syntax_tree.bug_instance import (  # noqa: E402
     FunctionInfo,
     _build_import_index,
@@ -48,6 +43,8 @@ from arkts_syntax_tree.bug_instance import (  # noqa: E402
     load_syntax_tree_jsonl,
 )
 from tools.track_agent import capture_patch, run_agent  # noqa: E402
+# 直接复用筛选模块，避免以子进程方式重复解析同一仓库和语法树。
+from tools.filter_complex_arkts_functions import find_complex_function_candidates  # noqa: E402
 
 
 def positive_int(value: str) -> int:
@@ -262,40 +259,18 @@ def _reachable_functions(graph: dict[str, set[str]], root: str) -> dict[str, int
     return distances
 
 
-def _downstream_dependency_count(graph: dict[str, set[str]], root: str) -> int:
-    downstream = set(_reachable_functions(graph, root))
-    return sum(
-        1
-        for caller, callees in graph.items()
-        if caller not in downstream
-        for callee in callees
-        if callee in downstream
-    )
-
-
 def _eligible_candidates(
     repo: Path,
     syntax_tree: Path,
     *,
-    min_out_degree: int,
-    min_consumers: int,
-    mutation_operator: str | None,
-    min_downstream_dependencies: int,
+    min_upstream_direct_call_count: int,
 ) -> tuple[list[tuple[Any, int]], dict[str, set[str]], dict[str, FunctionInfo]]:
-    candidates = find_bug_candidates(
+    candidates, graph, catalog = find_complex_function_candidates(
         repo,
         syntax_tree,
-        min_out_degree=min_out_degree,
-        min_downstream_consumers=min_consumers,
-        mutation_operators=[mutation_operator] if mutation_operator else None,
+        min_upstream_direct_call_count=min_upstream_direct_call_count,
     )
-    graph, catalog = _call_graph(repo, syntax_tree)
-    eligible = []
-    for candidate in candidates:
-        dependency_count = _downstream_dependency_count(graph, candidate.function.identity)
-        if dependency_count >= min_downstream_dependencies:
-            eligible.append((candidate, dependency_count))
-    return eligible, graph, catalog
+    return [(candidate, candidate.upstream_direct_call_count) for candidate in candidates], graph, catalog
 
 
 def _line_ending(value: str) -> str:
@@ -604,7 +579,7 @@ def _write_instance(
             "mask_kind": "empty_function_body",
             "out_degree": candidate.out_degree,
             "impact_score": candidate.impact_score,
-            "downstream_dependency_count": dependency_count,
+            "upstream_direct_call_count": dependency_count,
             "direct_callers": direct_callers,
             "upstream_functions": upstream_functions,
             "patches": {
@@ -636,10 +611,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["read-only", "workspace-write", "danger-full-access"],
         default="workspace-write",
     )
-    parser.add_argument("--min-out-degree", type=positive_int, default=1)
-    parser.add_argument("--min-consumers", type=nonnegative_int, default=0)
-    parser.add_argument("--mutation-operator", choices=DEFAULT_MUTATION_OPERATORS)
-    parser.add_argument("--min-downstream-dependencies", type=positive_int, default=1)
+    parser.add_argument("--min-upstream-direct-call-count", type=positive_int, default=5)
     parser.add_argument("--list-candidates", action="store_true")
     parser.add_argument(
         "--skip-codex",
@@ -670,10 +642,7 @@ def main(argv: list[str] | None = None) -> int:
         eligible, graph, catalog = _eligible_candidates(
             repo,
             syntax_tree,
-            min_out_degree=args.min_out_degree,
-            min_consumers=args.min_consumers,
-            mutation_operator=args.mutation_operator,
-            min_downstream_dependencies=args.min_downstream_dependencies,
+            min_upstream_direct_call_count=args.min_upstream_direct_call_count,
         )
 
         if args.list_candidates:
@@ -683,7 +652,7 @@ def main(argv: list[str] | None = None) -> int:
                 records.append(
                     {
                         **candidate.to_dict(),
-                        "downstream_dependency_count": dependency_count,
+                        "upstream_direct_call_count": dependency_count,
                         "direct_callers": direct,
                         "upstream_functions": upstream,
                     }
