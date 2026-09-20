@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 
 import build_scores
-import score_trajectories as st
 
 
 VALID_SCORE = {
@@ -18,6 +17,23 @@ VALID_SCORE = {
 }
 
 
+class EnumeratePairsTest(unittest.TestCase):
+    def test_join_labels_and_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "django__x").mkdir()
+            (root / "django__x" / "m1.json").write_text("{}")
+            cmp = root / "compare.json"
+            cmp.write_text(json.dumps({"django__x": {"m1.json": True, "m2.json": False}}))
+            pairs = build_scores.enumerate_pairs(cmp, root, None)
+            self.assertEqual(len(pairs), 2)
+            m1 = [p for p in pairs if p["submission"] == "m1"][0]
+            self.assertTrue(m1["exists"])
+            self.assertEqual(m1["score_path"], str(root / "django__x" / "m1.score.json"))
+            m2 = [p for p in pairs if p["submission"] == "m2"][0]
+            self.assertFalse(m2["exists"])
+
+
 class BuildTest(unittest.TestCase):
     def _tree(self, root: Path, *, with_score: bool):
         inst = "django__django-123"
@@ -28,7 +44,7 @@ class BuildTest(unittest.TestCase):
         cmp = root / "compare.json"
         cmp.write_text(json.dumps({inst: {"model.json": True}}))
         if with_score:
-            sp = st.score_path_for(root, inst, "model.json", None)
+            sp = build_scores.score_path_for(root, inst, "model.json", None)
             sp.write_text(json.dumps(VALID_SCORE), encoding="utf-8")
         return cmp, inst
 
@@ -70,7 +86,7 @@ class BuildTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cmp, inst = self._tree(root, with_score=True)
-            sp = st.score_path_for(root, inst, "model.json", None)
+            sp = build_scores.score_path_for(root, inst, "model.json", None)
             obj = json.loads(sp.read_text(encoding="utf-8"))
             for d in "ABCDEF":
                 obj["scores"][d]["score"] = 0

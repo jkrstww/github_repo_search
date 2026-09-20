@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Join Codex trajectory scores with resolved labels into a tidy CSV.
+"""Join trajectory scores with resolved labels into a tidy CSV.
 
 For every ``(instance, submission)`` in the compare file, load the matching
 ``<base>.score.json`` produced by ``score_trajectories.py``, read the judging
@@ -16,11 +16,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-import score_trajectories
-
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_COMPARE = score_trajectories.DEFAULT_COMPARE
-DEFAULT_TRAJS_ROOT = score_trajectories.DEFAULT_TRAJS_ROOT
+DEFAULT_COMPARE = SCRIPT_DIR / "experiments" / "diff_trajectories" / "verified" / "compare_verified.json"
+DEFAULT_TRAJS_ROOT = DEFAULT_COMPARE.parent
 DEFAULT_OUTPUT = SCRIPT_DIR / "experiments" / "diff_trajectories" / "verified" / "scored_resolved.csv"
 DEFAULT_UNSCORABLE = DEFAULT_OUTPUT.with_name("unscorable.jsonl")
 
@@ -29,6 +27,32 @@ CSV_FIELDS = [
     "A", "B", "C", "D", "E", "F",
     "raw_total", "total_score", "evidence_confidence", "caps_or_flags", "resolved",
 ]
+
+
+def _submission_base(sub_key: str) -> str:
+    return sub_key[:-5] if sub_key.endswith(".json") else sub_key
+
+
+def score_path_for(trajs_root: Path, instance: str, sub_key: str,
+                   judge_id: str | None) -> Path:
+    base = _submission_base(sub_key)
+    tag = f".{judge_id}" if judge_id else ""
+    return trajs_root / instance / f"{base}.score{tag}.json"
+
+
+def _validate_score(score: Any) -> tuple[bool, str]:
+    if not isinstance(score, dict) or not isinstance(score.get("scores"), dict):
+        return False, "missing scores"
+    total = 0.0
+    for dimension in "ABCDEF":
+        entry = score["scores"].get(dimension)
+        if not isinstance(entry, dict) or not isinstance(entry.get("score"), (int, float)):
+            return False, f"dimension {dimension} malformed"
+        total += float(entry["score"])
+    reported = score.get("total_score")
+    if not isinstance(reported, (int, float)) or abs(float(reported) - total) > 0.1:
+        return False, "total_score does not equal dimension sum"
+    return True, ""
 
 
 def _model_name(trajs_root: Path, instance: str, sub_key: str) -> str:
@@ -40,6 +64,34 @@ def _model_name(trajs_root: Path, instance: str, sub_key: str) -> str:
     if isinstance(agent, dict):
         return str(agent.get("model_name") or "unknown")
     return "unknown"
+
+
+def enumerate_pairs(
+    compare_path: Path, trajs_root: Path, judge_id: str | None
+) -> list[dict[str, Any]]:
+    """Join compare labels with on-disk trajectory files into a work list.
+
+    This is where a pair's ``resolved`` label enters the pipeline; the scorer
+    itself only ever sees the single trajectory file.
+    """
+    labels = json.loads(compare_path.read_text(encoding="utf-8"))
+    pairs: list[dict[str, Any]] = []
+    for instance in sorted(labels):
+        for sub_key in sorted(labels[instance]):
+            traj = trajs_root / instance / sub_key
+            pairs.append(
+                {
+                    "instance": instance,
+                    "submission": _submission_base(sub_key),
+                    "traj_path": str(traj),
+                    "score_path": str(
+                        score_path_for(trajs_root, instance, sub_key, judge_id)
+                    ),
+                    "resolved": bool(labels[instance][sub_key]),
+                    "exists": traj.is_file(),
+                }
+            )
+    return pairs
 
 
 def _row_from_score(pair: dict[str, Any], score: dict[str, Any]) -> dict[str, Any]:
@@ -78,7 +130,7 @@ def build(
     judge_id: str | None = None,
 ) -> tuple[int, int]:
     """Write scored rows + unsocrable log. Returns (n_scored, n_unscorable)."""
-    pairs = score_trajectories.enumerate_pairs(compare_path, trajs_root, judge_id)
+    pairs = enumerate_pairs(compare_path, trajs_root, judge_id)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     n_scored = 0
     unscorable: list[dict[str, Any]] = []
@@ -95,7 +147,7 @@ def build(
             except json.JSONDecodeError:
                 unscorable.append(_uns(pair, "score_not_json"))
                 continue
-            ok, reason = score_trajectories.validate_score(score)
+            ok, reason = _validate_score(score)
             if not ok:
                 unscorable.append(_uns(pair, f"invalid_score:{reason}"))
                 continue

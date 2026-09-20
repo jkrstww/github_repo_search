@@ -1,49 +1,600 @@
-version: "1.0"
-total: 100
-dimensions:
-  A:
-    name: 任务理解与验收标准
-    max_score: 15
-    criteria:
-      - {id: A1, name: 问题和成功标准, max_score: 5, case_types: [positive, counterexample]}
-      - {id: A2, name: 需保留的语义与约束, max_score: 5, case_types: [positive, counterexample]}
-      - {id: A3, name: 边界与复现计划, max_score: 5, case_types: [positive, boundary]}
-  B:
-    name: 根因定位与假设验证
-    max_score: 15
-    criteria:
-      - {id: B1, name: 调用链和上下文, max_score: 5, case_types: [positive, counterexample]}
-      - {id: B2, name: 因果实验, max_score: 5, case_types: [positive, boundary]}
-      - {id: B3, name: 责任层与替代解释, max_score: 5, case_types: [positive, counterexample]}
-  C:
-    name: 实现正确性、泛化与范围
-    max_score: 25
-    criteria:
-      - {id: C1, name: 核心语义, max_score: 10, case_types: [positive, counterexample]}
-      - {id: C2, name: 边界与兼容性, max_score: 7, case_types: [positive, boundary]}
-      - {id: C3, name: 通用性与抽象层, max_score: 5, case_types: [positive, counterexample]}
-      - {id: C4, name: 最小性与代码质量, max_score: 3, case_types: [positive, counterexample]}
-  D:
-    name: 测试设计与验证证据
-    max_score: 25
-    criteria:
-      - {id: D1, name: 修前基线, max_score: 5, case_types: [positive, counterexample]}
-      - {id: D2, name: 修后同测, max_score: 5, case_types: [positive, counterexample]}
-      - {id: D3, name: 反例与边界, max_score: 5, case_types: [positive, boundary]}
-      - {id: D4, name: 目标与相关回归, max_score: 5, case_types: [positive, counterexample]}
-      - {id: D5, name: 证据完整性和最终状态一致性, max_score: 5, case_types: [positive, counterexample]}
-  E:
-    name: 执行纪律与错误恢复
-    max_score: 10
-    criteria:
-      - {id: E1, name: 命令与编辑纪律, max_score: 3, case_types: [positive, counterexample]}
-      - {id: E2, name: 错误分类, max_score: 3, case_types: [positive, counterexample]}
-      - {id: E3, name: 反馈驱动迭代, max_score: 3, case_types: [positive, boundary]}
-      - {id: E4, name: 效率和风险控制, max_score: 1, case_types: [positive, counterexample]}
-  F:
-    name: 收尾、补丁卫生与可审计性
-    max_score: 10
-    criteria:
-      - {id: F1, name: 清理和状态检查, max_score: 3, case_types: [positive, counterexample]}
-      - {id: F2, name: 补丁范围与可应用性, max_score: 4, case_types: [positive, counterexample]}
-      - {id: F3, name: 提交协议和诚实总结, max_score: 3, case_types: [positive, counterexample]}
+rubric:
+  name: Code Agent Trajectory Quality
+  version: "2.1"
+  total_score: 100
+
+  criteria:
+
+    - id: A
+      name: 任务理解与验收标准
+      description: >
+        评估 agent 是否把 issue 转化为可执行、可观察且包含兼容约束的验收标准。
+      max_score: 15
+      subcriteria:
+
+        - id: A1
+          name: 理解问题并定义成功标准
+          description: >
+            评估 agent 在修改前是否把 issue 症状转化为明确的预期行为和可验证断言
+          pass_condition: >
+            明确受影响路径、预期行为和可观察输出或状态，并能据此判断修复是否成功。
+          fail_condition: >
+            只复述 traceback、文件名或实现名，没有说明什么输出或状态才算修复。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Astropy 的 HTML writer 接收带有 formats 参数的表格时，生成的 HTML
+              没有按照每一列请求的格式渲染数值；问题位于 HTML writer 没有完整复用通用的
+              列格式化流程。
+              Agent 行为：agent 阅读 html.py 和 BaseData 的格式化路径后，
+              明确说明修复后的同一输入必须在 HTML 输出中呈现符合 formats 参数的值，例如
+              `1.24e-24` 和 `3.23e-15`，而不仅仅是成功生成 HTML 文件。
+          negative_examples:
+            - >
+              任务描述：同一个 Astropy issue 要求 HTML writer 遵守表格列的 formats 参数，
+              并保持普通列、多维列和无 formats 参数时的既有输出语义。
+              Agent 行为：agent只重复“formats ignored”或 traceback，随后直接编辑第一个匹配的代码行，
+              没有说明哪些 HTML 值应该改变、哪些行为必须保持，也没有定义修复后的可观察断言。
+
+        - id: A2
+          name: 保留必需的语义与约束
+          description: >
+            评估 agent 在修改前是否识别出目标行为与既有行为之间必须保持的语义边界，明确哪些
+            既有语义、兼容约束和非目标不能因本次修改而改变
+          pass_condition: >
+            在修改前列出目标新增或变化的规则、必须保留的既有行为和非目标，并明确不得改变的
+            默认值、调用签名与参数位置、返回值类型或结构、异常类型与触发条件、序列化格式、
+            版本兼容性等具体约束；问题涉及性能、并发或安全时，也明确查询数量、响应时间、
+            并发程度、资源上限或安全边界等可检查的预算和边界。
+          fail_condition: >
+            只提出单一改动条件，未说明哪些既有输入输出、调用方式、异常或数据表示必须保持，
+            或把接口签名、返回值/异常、序列化兼容性、性能、并发或安全边界等受影响的契约
+            当成无关细节。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Django 的 ModelForm 在请求中省略一个字段时，construct_instance()会保留模型默认值；
+              但如果 form.clean() 随后把一个非空派生值写入 cleaned_data，这个派生值应当覆盖模型默认值，
+              同时真正的空值、checkbox 和 FileField 的既有行为不能改变。
+              Agent 行为：agent 在编辑前明确区分“省略但 clean() 提供非空值”与“省略且 cleaned_data 仍为空”两种情况，
+              并把保留模型默认值、checkbox 和文件字段行为列为兼容约束。
+          negative_examples:
+            - >
+              任务描述：同一个 Django issue 需要让 clean() 产生的非空值进入模型实例，同时继续让真正的空值保留模型默认值。
+              Agent 行为：agent 只看到字段是否存在的问题，把判断改成 `f.name in form.fields`，
+              没有区分 cleaned_data 中是否有派生值，也没有说明空字符串、复合字段和文件字段应如何处理。
+              该方案没有建立新旧语义的边界，可能修复主案例却覆盖模型默认值或改变其他字段的既有行为。
+
+        - id: A3
+          name: 考虑边界情况
+          description: >
+            评估 agent 在修改前是否设计覆盖主案例、合法边界和错误输入的测试
+          pass_condition: >
+            明确列出主案例、相关边界和应失败的输入，并为每种情况写出预期结果、断言和测试方法；
+            计划能够被后续以相同输入复用。
+          fail_condition: >
+            只列出一个主案例，没有说明其他相关输入应该如何表现，或没有为边界和错误输入指定
+            可执行的断言与测试方法。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Django ModelForm 的修复必须区分“字段省略但 clean() 产生派生值”、
+              “字段省略且没有派生值”和不同字段类型的空值语义。
+              Agent 行为：agent 在编辑前写出一份具体的测试计划，分别测试这两种省略情况、显式空字符串、
+              checkbox、SplitDateTimeField 和 FileField，并为每种输入写明模型字段应该覆盖模型默认值还是保留默认值，
+              要求修复后用相同输入和判断再次运行。该计划同时包含主案例、其他正常场景和边界场景，
+              能够发现只适用于简单 CharField 的过拟合补丁。
+          negative_examples:
+            - >
+              任务描述：Astropy HTML writer 应为带 formats 参数的普通列和多维列应用格式，
+              同时保持 masked、无 formats 和 callable format 等输入的原有语义。
+              Agent 行为：agent 只用一个一维浮点列生成 HTML，看到单个数值格式正确后就结束，
+              没有测试多维子列、masked 值、无格式列或 callable formatter，也没有写出这些输入应该得到什么结果。
+              测试计划只有一个主案例，既没有说明相邻输入必须保持什么行为，
+              也没有办法检查修复是否对这些边界造成回归，因此无法区分完整修复和只针对单列的特判。
+
+    - id: B
+      name: 根因定位与假设验证
+      description: >
+        评估轨迹是否分别说明调用链如何产生错误、候选原因如何被实验检验，以及最终修改点
+        是否精准落在产生该错误的函数、分支或状态转换上，并且不会修改无关代码。
+      max_score: 15
+      subcriteria:
+
+        - id: B1
+          name: 调用路径与数据流
+          description: >
+            评估 agent 是否真正说明了一个输入从哪里进入系统，经过哪些函数或分支，在哪一步
+            变成错误结果，以及这个结果最后如何返回给调用方。
+          pass_condition: >
+            轨迹能够按顺序说明：问题输入或调用从哪里开始；关键函数如何处理、转换或传递它；
+            哪个条件、状态或操作数导致了异常结果；异常、返回值或状态又如何传回调用方。若
+            环境可能导入错误代码，还要确认实际导入路径、版本和当前 checkout。
+          fail_condition: >
+            只根据关键词、单个文件名或相似代码猜测责任点，没有说明数据和控制流如何到达失败处；
+            或者实际运行的是已安装包、复制出来的函数或错误的工作树。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Astropy 的 Quantity 与实现自定义 `__array_ufunc__` 的 DuckArray 一起
+              参与 NumPy 运算时，Quantity 的输入转换会抛错；如果另一个操作数能够接管运算，
+              Quantity 应返回 `NotImplemented`，而不是直接结束整个运算。
+              Agent 行为：agent 从 `Quantity.__array_ufunc__` 的入口开始，说明 NumPy 传入了哪些操作数；
+              随后跟到 `converters_and_unit` 和 `_condition_arg`，指出转换在哪一步因 DuckArray 失败、
+              哪个判断决定是否把结果交还给另一个操作数。agent 不只是列出几个相关函数，
+              而是解释了输入、处理步骤、失败位置和返回结果之间的先后关系，因此能够定位真正的责任点。
+          negative_examples:
+            - >
+              任务描述：同一个 Quantity issue 只允许在另一个操作数能够实现自定义 ufunc 协议时进行委托；
+              普通单位不兼容仍必须抛出原有错误。
+              Agent 行为：agent 搜索到 `ValueError` 和 `NotImplemented` 后，直接编辑第一个匹配的 catch block，
+              没有查看 `__array_ufunc__` 的调用者、转换步骤或其他操作数，也无法说明异常是在哪一步产生、
+              哪个对象会接管运算。agent 只有词语和文件位置，没有把输入如何经过代码、在哪里失败、结果如何传播说清楚；
+              因此无法判断修改会不会吞掉普通用户错误。
+
+        - id: B2
+          name: 因果实验
+          description: >
+            评估 agent 是否在正式修复前用受控、最小的区分性实验验证候选根因
+          pass_condition: >
+            在不改变产品补丁的前提下，一次只改变一个候选因素，沿真实调用路径观察带断言的
+            输出或状态，并据此排除至少一个替代解释
+          fail_condition: >
+            只有代码类比或最终通过，没有能排除替代解释的因果实验，或只验证复制出的 helper
+            而没有验证真实端到端路径。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Astropy HTML writer 忽略 formats 参数，候选根因是 writer 在调用通用字符串渲染前没有建立当前列和格式缓存。
+              Agent 行为：agent 对同一张表做受控实验：首先按原路径渲染并观察原始精度值；随后只补上 `data.cols = cols` 和
+              `_set_col_formats()` 所代表的临时状态转换，再次渲染并观察 `1.24e-24`、`3.23e-15`等目标值。
+              实验保持输入和渲染路径不变，只改变候选状态因素，输出差异直接支持“缺失格式状态转换”这一根因
+          negative_examples:
+            - >
+              任务描述：同一个 HTML 格式问题可能由未设置 columns、未初始化 format 或导入了已安装版本等不同原因造成。
+              Agent 行为：agent 只在文本中比较 html.py 与 BaseData.str_vals()，看到后者调用 `_set_col_formats()` 就认定根因，
+              没有运行失败 writer，也没有记录补状态前后的 HTML 输出或导入路径。
+              静态相似性只能形成候选假设，不能排除列状态、环境或多维处理等替代解释。
+
+        - id: B3
+          name: 错误代码定位
+          description: >
+            评估 agent 是否从实际执行结果中定位出违反预期行为的具体源代码：指出需要修改的
+            文件、函数、条件分支、状态初始化或数据转换，并说明其中哪个错误操作或判断直接
+            产生了错误结果；同时排除只是传递、包装或报告错误的代码，以及调用方、配置、依赖
+            和测试代码。
+          pass_condition: >
+            明确指出待修改的文件、函数和具体代码位置（如条件分支、状态更新或数据转换），
+            将该位置中的错误操作或判断与可观察的错误输出一一对应，并说明为什么调用方、错误
+            传播/报告代码、配置、依赖或测试代码不是修改对象；对不属于目标场景的输入仍保留
+            原有结果或异常。
+          fail_condition: >
+            只笼统指出模块、文件或“某个 helper”，没有定位到具体函数和错误操作/判断；把调用方、
+            错误传播或报告代码、测试、配置、依赖当成修改对象；或无法说明所指代码如何直接造成
+            错误结果。通过宽泛异常、静默 fallback 或扩大修改范围掩盖错误，也不算定位到错误代码。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Astropy Quantity 的转换失败有三种可能含义：另一个操作数实现了
+              `__array_ufunc__`、单位确实不兼容，或者输入本身非法。只有第一种情况应该让
+              NumPy 继续协议委托，后两种情况必须保留原异常。
+              Agent 行为：agent 沿 Quantity 的 ufunc 协议层修改实现，并分别运行 DuckArray、不兼容 Quantity
+              单位和没有自定义协议的普通对象；结果只有 DuckArray 路径返回 NotImplemented，
+              其他路径仍抛出原来的错误。agent 把修复放在负责协议协商的源代码层，
+              同时用替代输入证明这不是一个可以用“捕获所有异常”解决的普通转换错误。
+          negative_examples:
+            - >
+              任务描述：同一个 ufunc issue 只要求“有其他协议实现时才委托”，并没有要求把
+              所有 TypeError/ValueError 变成成功或 NotImplemented。
+              Agent 行为：agent 没有检查其他操作数，直接用 `except (TypeError, ValueError)` 包住整个转换过程并无条件返回
+              NotImplemented；它只运行 DuckArray 主案例，没有测试不兼容单位和非法输入。
+              agent 没有排除“普通用户错误”这一替代解释，且在错误的异常处理边界吞掉了本应暴露的错误；主案例通过并不能证明修复放在了实际产生错误的处理步骤。
+
+    - id: C
+      name: 实现正确性与泛化性
+      description: >
+        评估最终实现是否修复真实语义、保持兼容性、覆盖合法变体且控制改动范围。
+      max_score: 25
+      subcriteria:
+
+        - id: C1
+          name: 实现核心行为
+          description: >
+            评估最终补丁是否在实际产生错误结果的源代码处理步骤完整满足 issue 的核心行为契约。
+          pass_condition: >
+            原始失败路径得到正确结果，且必要的前置状态、producer 和 consumer 均已建立。
+          fail_condition: >
+            只修复表象、遗漏必要状态，或让主案例偶然通过。
+          score: 10
+          positive_examples:
+            - >
+              任务描述：Astropy HTML writer 接收到带 formats 的列时没有按请求格式输出，通用
+              BaseData 路径要求当前列状态和格式缓存都已建立。
+              Agent 行为：最终补丁在遍历 string values 前同时执行 `self.data.cols = cols` 和 `_set_col_formats()`，
+              让普通列及多维列拆分出的 child columns 都从正确的当前列集合取得 formatter。
+              实现补齐了 producer/consumer 之间缺失的两个前置状态，在真正负责渲染语义
+              的路径上完整修复主行为，而不是替换一个示例字符串。
+          negative_examples:
+            - >
+              任务描述：同一个 HTML writer 中 `_set_col_formats()` 会读取 `self.data.cols`，而
+              调用者传入的 `cols` 才是本次渲染应使用的列集合。
+              Agent 行为：补丁只增加 `_set_col_formats()`，却没有先把 `cols` 赋给 `self.data.cols`，随后就遍历字符串值。
+              formatter 的 consumer 仍可能读到旧列或空状态，补丁看似接近通用实现，却遗漏核心前置条件，主样例即使偶然通过也不是完整语义修复。
+
+        - id: C2
+          name: 实现的兼容性
+          description: >
+            评估最终实现是否只改变问题要求改变的行为，并保留其他已有输入、调用方式和错误处理的
+            原有结果。这里关注的是修复有没有破坏旧契约，而不是它覆盖了多少种新情况。
+          pass_condition: >
+            除问题明确要求改变的结果外，原有输入和调用方式仍得到相同含义的结果；原有错误仍在
+            正确条件下出现；返回值类型、数据格式和状态变化没有无依据的改变。对受影响的相邻
+            旧场景，代码也继续遵守原有规则。
+          fail_condition: >
+            为了让主案例通过而改变了不相关输入、空值或缺省值、错误处理、调用方式、返回值类型、
+            数据格式或状态变化；原有错误被吞掉或改成了其他错误；或者只修正了一个表面表示，
+            破坏了同一功能的其他既有路径。
+          score: 7
+          positive_examples:
+            - >
+              任务描述：Django construct_instance() 需要让 clean() 派生的非空值覆盖模型默认值，
+              但 omitted/empty 输入仍应按每个 Field 的既有空值契约处理。
+              Agent 行为：补丁使用 `field.empty_values` 判断 cleaned_data 中的值，而不是调用
+              `field.to_python(None)` 猜测统一空值；并检查 SplitDateTimeField、FileField、
+              empty string 和模型默认值路径。实现复用字段公开的空值语义，
+              因而在修复新行为时保留复合字段、文件字段和默认值的合法边界。
+          negative_examples:
+            - >
+              任务描述：SplitDateTimeField 的 widget 空值可能表现为 `[None, None]`，与简单
+              Field 对 None 的转换结果不同。
+              Agent 行为：agent 已观察到这种差异，最终仍用 `field.to_python(None)` 作为所有字段的统一 emptiness 判据，
+              也没有测试显式空串和 FileField。该抽象忽略字段自己的 empty_values 契约，会把
+              合法复合空值分类错误，从而错误保留或覆盖模型默认值。
+
+        - id: C3
+          name: 实现的通用性
+          description: >
+            评估实现是否适用于与主案例遵守同一规则的其他合法情况，而不是只针对报告中的一个
+            类型、对象或调用示例编写特判。
+          pass_condition: >
+            将逻辑放在这些合法情况共同经过的已有处理路径上，并能覆盖相关的不同类型、调用方式
+            或运行环境；问题涉及资源时，也保持同一资源规则，而不是只让一个样例通过。
+          fail_condition: >
+            主案例通过，但同一规则下的其他合法情况需要另写特判、无法工作或根本没有被考虑；
+            或使用具体类型判断、宽泛异常、静默 fallback 等方式掩盖实现并未真正支持这些情况。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Django ModelForm 的实例构造逻辑要同时适用于普通字段、复合字段和
+              FileField，并继续遵守 fields/exclude 过滤。
+              Agent 行为：agent 保留现有字段过滤和文件字段延后赋值流程，只在共享的默认值 guard 中使用 `field.empty_values`，
+              没有为 CharField、SplitDateTimeField 或 FileField 添加类型特判。
+              修改落在所有合法字段共同经过的抽象层，使用框架已有契约覆盖多个字段类型，
+              而不是为报告中的单一样例编码。
+          negative_examples:
+            - >
+              任务描述：Astropy Quantity 应能与任意正确实现 NumPy 自定义 ufunc 协议的类型
+              协作，而不只是 issue 中演示的某个 DuckArray 类。
+              Agent 行为：补丁按具体 DuckArray 类名特判，或为让该例通过而把所有转换异常都变成 NotImplemented；
+              没有验证普通 Quantity、reduce/out/where、无效输入或另一种协议对象。
+              实现绑定一个样例而非共享协议抽象，无法泛化到同一契约下的其他合法变体。
+
+        - id: C4
+          name: 最小性与代码质量
+          description: >
+            评估最终源代码 diff 的设计质量：是否局部、可读、符合项目风格并避免无证据的范围扩张。
+          pass_condition: >
+            源文件改动小而完整，无重复逻辑、宽泛异常、测试削弱或无关文件改动；改动复杂度
+            与验证证据匹配。
+          fail_condition: >
+            为局部问题扩展多个低层组件、引入公共 API/跨模块复杂分支，或只用 py_compile、
+            少量脚本支撑无法审计的复杂改动。
+          score: 3
+          positive_examples:
+            - >
+              任务描述：Django ModelForm 的 bug 位于 forms/models.py 中 construct_instance()
+              的默认值 guard，所需语义可由现有 Field 空值契约表达。
+              Agent 行为：最终 diff 只在该 guard 做小而完整的条件调整，沿用本地命名和控制流，没有复制 cleaning 逻辑、
+              添加宽泛异常处理，也没有修改测试、settings 或无关 query 类。
+              补丁范围与已定位的根因一致，代码可读且回归面有限，每一行变化都有任务依据。
+          negative_examples:
+            - >
+              任务描述：一个 Django 查询问题的实际缺口是局部状态没有在特定边界上传递。
+              Agent 行为：agent 没有证明哪些状态必要，就把多个属性复制逻辑扩展到若干低层
+              Query 类，改变共享 clone/join 行为；新增分支既重复又缺少对应测试。
+              一个局部修复被扩大成跨组件改动，复杂度和回归面显著增加，却没有成比例的
+              因果证据或回归验证支撑这些额外变化。
+
+    - id: D
+      name: 测试设计与验证证据
+      description: >
+        评估轨迹是否用可信、相关且对应最终补丁的 red-to-green 证据验证行为。
+      max_score: 25
+      subcriteria:
+
+        - id: D1
+          name: 修改前失败复现
+          description: 评估是否在编辑前用业务断言证明目标行为确实失败
+          pass_condition: >
+            在编辑前对未修改的当前 checkout（记录 HEAD、导入路径和关键环境）运行带业务
+            断言的最小复现，并保留失败输出和真实返回码。
+          fail_condition: 只编译、静态检查或引用报告，没有 red baseline。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Django ModelForm 在提交数据省略某字段、但 clean() 为该字段生成非空
+              值时，应把派生值赋给模型，而不是继续使用 model_default。
+              Agent 行为：在修改 forms/models.py 前，agent 对当前 checkout 运行最小表单复现，断言实例字段等于
+              派生值；测试实际失败并显示实例仍为 `model_default`，同时保留命令输出和失败状态。
+              这条记录证明目标业务断言在待修改基线上确实为 red，后续通过不能被解释为测试本来就绿或运行了其他版本。
+          negative_examples:
+            - >
+              任务描述：Astropy HTML writer 的 issue 声称 formats 参数没有影响最终 HTML
+              数值，修复需要证明当前源码会产生未格式化输出。
+              Agent 行为：编辑前只对 html.py 运行 py_compile、搜索 `_set_col_formats` 或查看代码 diff，
+              没有实际构造表格和断言 HTML 值，也没有保存任何失败返回码。静态检查只能证明文件可
+              解析或代码看起来可疑，不能证明业务问题在当前 checkout 上存在，因此没有可信基线。
+
+        - id: D2
+          name: 修复后断言验证
+          description: 评估最终补丁是否修复错误
+          pass_condition: 修复后用同一输入、同一调用路径和同一业务断言复跑，结果改变为预期，
+            且测试对象是最终源码和最终 diff 对应的 checkout。
+          fail_condition: 换测试、削弱断言、测试已安装包/复制函数、只打印成功或只声称通过。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Astropy HTML writer 在修复前用同一张带 formats 的表输出原始精度值，
+              目标是使输出包含请求的科学计数格式。
+              Agent 行为：补上列状态和 formatter 初始化后，agent 原样重跑修前的 writer 命令和断言；
+              先前失败的数值现在变为 `1.24e-24`、`3.23e-15`，且导入路径指向最终修改的 checkout。
+          negative_examples:
+            - >
+              任务描述：Django ModelForm 修前测试断言 clean() 的派生值必须覆盖模型默认值。
+              Agent 行为：补丁没有让该断言通过，agent 却把断言改成只检查“不抛异常”、换成
+              print 输出，或让命令导入 site-packages 中的 Django 后再报告成功。
+              修后验证不再等价于修前失败条件，结果通过可能来自削弱 oracle 或测试，不能证明最终补丁解决原问题。
+
+        - id: D3
+          name: 测试反例与边界情况
+          description: 评估是否实际执行"考虑边界条件"计划中的、能发现过拟合和兼容回归的反例与合法边界测试
+          pass_condition: 至少覆盖一个主案例之外的合法边界和一个应失败或保持旧行为的断言；
+            输入确实命中目标路径，断言业务结果、类型、身份、异常或资源行为，而非只检查不抛异常。
+          fail_condition: 只有主案例通过，输入为空/fixture 无效、只打印 SUCCESS、只测内部 helper，
+            或邻近输入和错误语义未知。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Django construct_instance() 的条件变化可能影响默认值、复合字段和文件
+              字段，不能只验证一个带派生值的 CharField。
+              Agent 行为：agent 使用确实命中实例构造路径的表单数据，分别断言 derived non-empty 覆盖默认值，
+              empty string 和真正 omitted input 按契约保留或设置值，并检查 SplitDateTimeField、checkbox、FileField
+              的最终模型值。测试既有正向案例，也有应保持旧行为的反例和不同表示边界，断言的是用户可见结果而非仅“不报错”。
+          negative_examples:
+            - >
+              任务描述：Astropy Quantity 的协议修复必须让 DuckArray 有机会接管，同时仍拒绝
+              不兼容单位和非法普通对象；HTML 格式修复也必须保留无格式及多维输入。
+              Agent 行为：agent 只运行 issue 中的一个 DuckArray 操作并看到成功，没有断言不兼容单位仍抛错，
+              也没有覆盖 plain object 或相邻的格式/多维路径。单一主案例无法
+              发现“捕获所有异常”这类过拟合实现，错误语义和兼容边界仍完全未知。
+
+        - id: D4
+          name: 回归测试
+          description: 评估测试选择是否覆盖目标路径及合理的官方回归测试
+          pass_condition: 定向业务测试和相关官方或回归套件均针对最终源码并包含目标路径断言，
+            同时覆盖相关后端、协议、格式或生命周期路径；记录跳过项及其原因。
+          fail_condition: 跑无关大套件、已安装版本、错误 checkout，或没有目标路径断言/掩盖跳过和失败。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Django ModelForm 的局部默认值修复既要通过 issue 复现，也可能影响所有
+              模型表单和普通表单行为。
+              Agent 行为：agent 先运行带派生值的定向复现，随后针对同一最终源码运行 model_forms 和 forms_tests 等相关官方套件，
+              保留各命令测试数量、跳过情况和返回码。验证选择同时覆盖新增目标路径和最可能受条件修改影响的回归面，相关性清楚，
+              而不是用无关测试数量代替业务覆盖。
+          negative_examples:
+            - >
+              任务描述：Astropy Quantity 与 DuckArray 的失败发生在特定 __array_ufunc__ 转换和委托路径。
+              Agent 行为：agent 报告一个规模很大的通用测试套件通过，或运行系统中已安装 Astropy 的测试，
+              却从未在编辑 checkout 上执行该混合操作，也没有相关协议断言。
+              测试量大不代表目标路径被覆盖；源码身份和业务相关性均未建立，结果不能说明补丁是否修复或回归了 ufunc 协议。
+
+        - id: D5
+          name: 测试记录真实且可复核
+          description: >
+            评估轨迹中的测试记录是否足以让别人确认“运行了什么、测到了什么、结果是否真的成功或失败”。
+          pass_condition: >
+            对每条关键测试记录实际执行的完整命令、主要输出和测试进程本身的退出状态，并说明测试
+            使用的是哪一份源码；记录中的输出能够对应到实际断言和所报告的结果，没有截断、过滤、
+            忽略异常或用 shell 命令掩盖失败。
+          fail_condition: >
+            缺少完整命令、关键输出、真实退出状态或源码位置，导致别人无法判断测试是否真正运行；
+            使用管道末端状态、`|| true`、捕获异常后继续、截断或过滤输出来制造“通过”；或者实际
+            测试的源码和环境与声称的目标版本不一致。
+          score: 5
+          positive_examples:
+            - >
+              任务描述：Astropy HTML 修复的可信度取决于测试是否针对最终两行状态补丁，且测试
+              之后没有未验证的编辑。
+              Agent 行为：agent 保存完整复现/pytest 命令、stdout、stderr 和真实退出码，并记录测试进程实际导入的源码位置；
+              没有用管道末端状态替代测试进程状态。reviewer 能从轨迹定位每条测试证据并复核其业务断言。
+          negative_examples:
+            - >
+              任务描述：Django ModelForm 的验证命令中实际测试可能失败，评分必须取得测试进程
+              自身的退出状态。
+              Agent 行为：agent 使用 `pytest ... | tail`、`|| true`，在脚本中 catch AssertionError，
+              或只保留截断输出；shell 最终返回 0 后便声称通过，也没有记录实际测试进程的退出码和导入位置。
+              管道末端或被吞掉异常掩盖了真实失败，测试证据无法复核并可能产生假阳性。
+
+    - id: E
+      name: 命令编辑与失败恢复
+      description: >
+        评估命令、编辑和失败后的迭代是否窄、有目的、可恢复且由反馈驱动。
+      max_score: 10
+      subcriteria:
+
+        - id: E1
+          name: 命令与编辑的质量
+          description: 评估调查和修改过程中的命令、编辑是否服务于当前假设并保留真实结果
+          pass_condition: >
+            每条命令有明确目的，退出码和原始输出未被 shell 结构掩盖，编辑范围可审计；失败后
+            停止盲重试并改用更简单、可验证的命令。
+          fail_condition: 重复畸形命令、宽泛替换、固定行号/全局替换、git add -A 或无目的高风险操作。
+          score: 3
+          positive_examples:
+            - >
+              任务描述：Astropy HTML writer 的问题需要定位格式状态、复现输出并确认最终补丁，
+              无需大规模改动环境。
+              Agent 行为：agent 依次用窄范围命令阅读 html.py 与通用格式 helper、
+              运行一个带断言的 HTML 复现、执行相关 writer 测试，最后检查 diff/status；
+              每条命令都回应当前假设并保留原始返回结果，没有重复无效操作或用 shell 结构掩盖失败，执行过程直接推动问题求解。
+          negative_examples:
+            - >
+              任务描述：agent 需要在任意代码任务中调用 shell 工具读取源码和运行测试。
+              Agent 行为：agent 把数组形参数或不合法语法反复当作命令发送，每次都得到 exit 127；
+              它既不阅读报错，也不改成简单有效的单条命令，随后继续做宽泛替换。
+              这些调用没有产生关于产品问题的新证据，重复的工具协议错误和不可审计编辑表明命令并未服务于明确假设。
+
+        - id: E2
+          name: 错误分类
+          description: 评估 agent 是否正确分类执行过程中遇到的代码、测试、依赖、配置和基线故障，
+            并选择相应恢复动作
+          pass_condition: 根据错误来源选择恢复动作，记录依赖/配置/测试基线故障，并确认导入路径
+            和版本；不把环境失败当作最终结论，也不让临时环境修复进入业务 patch。
+          fail_condition: 看到导入或构建失败就断言代码对错，或反过来忽略真实失败；通过全局安装、修改无关源码或吞异常制造伪成功。
+          score: 3
+          positive_examples:
+            - >
+              任务描述：Django ModelForm 测试启动时可能先因缺少依赖或 test runner 配置错误
+              失败，这与 construct_instance() 的业务行为不同。
+              Agent 行为：agent 从 traceback 判断该次失败发生在导入/配置阶段，记录为环境阻塞而非代码回归；确认源码导入路径后，
+              用不依赖该 runner 的聚焦语义复现继续验证默认值行为。
+              agent 根据错误来源选择恢复动作，既没有把环境错误当成补丁失败，也没有把替代复现冒充完整套件。
+          negative_examples:
+            - >
+              任务描述：Astropy 测试需要本地编译扩展和兼容 NumPy，导入失败可能发生在目标
+              Quantity 代码执行之前。
+              Agent 行为：源码 import 因扩展未构建或 NumPy 不可用而失败，agent 没有确认失败阶段、基线或导入路径，
+              就据此断言补丁正确或错误并结束，环境可执行性和代码语义被混为一谈；在目标路径从未运行的情况下，
+              这类错误不能支持任何实现结论。
+
+        - id: E3
+          name: 反馈驱动迭代
+          description: 评估失败反馈是否导致假设、命令或实现的具体更新
+          pass_condition: 测试暴露新边界后，下一步针对该边界修改假设/实现并重新验证原失败路径，
+            最终修改后再次运行关键验证。
+          fail_condition: 相同失败被原样重复、达到重试上限仍无新观测，或发现反例/红测后改断言、
+            定义为题外并照旧收尾。
+          score: 3
+          positive_examples:
+            - >
+              任务描述：Astropy HTML writer 的第一版格式修复使普通列通过，但测试显示多维列
+              拆出的 child columns 仍没有继承父列 formatter。
+              Agent 行为：agent 没有重复原命令或忽略失败，而是根据断言更新“格式状态还需传播”的假设，补上多维列传播逻辑，
+              随后重跑原失败案例和主案例。
+              新的失败信息明确改变了实现策略，且同一反馈路径在最终代码上得到重新验证，形成有效迭代闭环。
+          negative_examples:
+            - >
+              任务描述：代码任务中的 patch 应用或测试命令已经明确报告同一个语法、路径或依赖错误。
+              Agent 行为：agent 不阅读输出，连续提交完全相同的畸形 patch 或不可用命令，
+              每次得到相同失败；既不缩小命令，也不改变假设或选择替代验证。
+              失败反馈没有导致任何可观察的策略更新，重复次数增加却没有推进诊断或恢复。
+
+        - id: E4
+          name: 效率和风险控制
+          description: 评估是否先做低成本区分性实验并控制调查过程的环境与工作树风险
+          pass_condition: 先做最小区分性复现，再运行必要回归；临时状态可回退并与业务 patch
+            隔离，没有不必要的全局变更。
+          fail_condition: 先全局安装/升级依赖、后台运行或大规模测试，增加风险却没有区分性证据，
+            或将临时环境修改留在交付物。
+          score: 1
+          positive_examples:
+            - >
+              任务描述：Astropy HTML 输出错误有多个候选原因，直接运行全仓库套件成本高且不易
+              区分格式状态问题。
+              Agent 行为：agent 先用短小、可回退的 HTML 脚本比较同一表格在补齐状态前后的值，快速确认 stale-format 假设；
+              只有在该区分性实验成立后，才运行 HTML/write 相关套件和多维边界。
+              验证顺序以最低成本获得最大诊断信息，同时避免无必要的全局依赖或工作树风险。
+          negative_examples:
+            - >
+              任务描述：目标 bug 可以通过一个局部业务调用复现，但环境中存在若干可选依赖。
+              Agent 行为：agent 在建立最小复现前反复全局安装、升级或降级包，或多次运行整个epository suite；
+              这些操作仍未执行目标路径，也没有隔离环境变化。
+              高成本操作增加依赖污染和时间风险，却没有产生能区分候选根因的证据。
+
+    - id: F
+      name: 收尾、补丁卫生与可审计性
+      description: 评估交付前清理、补丁范围、可应用性和总结是否与证据一致。
+      applicable_condition: ""
+      max_score: 10
+      subcriteria:
+
+        - id: F1
+          name: 清理和状态检查
+          description: 评估是否在交付前清理临时产物并核对最终工作树
+          pass_condition: 删除或隔离复现脚本、日志、备份、临时 settings/测试和构建产物，并检查
+            git status、git diff --check 及完整 diff。
+          fail_condition: 临时文件、测试改动、环境补丁或无关改动留在最终工作树且未说明。
+          score: 3
+          positive_examples:
+            - >
+              任务描述：Django ModelForm 修复过程中创建的临时复现脚本、日志和测试配置只用于
+              调查，不属于交付补丁。
+              Agent 行为：agent 在完成验证后删除这些产物或确保它们位于 patch 外，恢复临时测试修改，
+              并运行 git status、完整 diff 和 diff --check，确认最终只剩预期源码或授权测试变更。
+              最终工作树能够清楚区分交付物和调查残留，reviewer 不需要猜测哪些文件是有意修改。
+          negative_examples:
+            - >
+              任务描述：同一个 Django 修复过程可能生成临时脚本、复制的安装包、日志、backup
+              和构建缓存，这些内容不应进入产品补丁。
+              Agent 行为：agent 在结束前没有检查 status，将上述文件以及临时 settings/测试改动留在 worktree，
+              也没有说明它们是否必要。
+              调查产物与真实修复混在一起，扩大补丁范围并使最终状态无法审计，还可能把环境污染错误地交付给下游。
+
+        - id: F2
+          name: 补丁范围与可应用性
+          description: 评估最终 patch 是否非空、可应用、范围获授权并完整对应已测试源码
+          pass_condition: 使用 git diff HEAD（同时核对 staged/unstaged）确认 diff 只含必要改动、
+            非空且能独立应用；测试与 patch 来自同一 checkout，并可通过 git apply --check。
+          fail_condition: 只查看 unstaged 或 staged 的一侧、漏掉核心改动，包含测试/环境污染/无关文件，
+            或为空/不可应用 patch。
+          score: 4
+          positive_examples:
+            - >
+              任务描述：Astropy HTML writer 的已验证修复只需要在 html.py 补齐当前 columns 和
+              formatter 初始化。
+              Agent 行为：agent 用 git diff HEAD 同时核对 staged/unstaged内容，最终 patch 只包含这两行必要源码变化；
+              patch 非空、可应用，且测试使用的正是该 checkout，没有复制 site-packages、依赖 pin 或无关配置。
+              交付物与已验证实现一一对应，范围窄、可独立应用，也没有遗漏暂存区中的核心修改。
+          negative_examples:
+            - >
+              任务描述：Django ModelForm 的产品修复应能与测试环境调整和调查脚本分离。
+              Agent 行为：为让命令变绿，agent 修改测试断言、依赖锁、生成文件或无关源码，并把
+              这些内容连同业务改动放入最终 patch；或者先 git add -A，随后只查看默认 git diff，
+              导致核心 staged 修复没有进入补丁。
+              patch 不是已测试产品修复的完整且最小表示，可能受环境污染、遗漏或不可应用问题影响。
+
+        - id: F3
+          name: 总结与轨迹证据一致性
+          description: >
+            评估最终总结是否只根据轨迹中实际展示的操作、输出和状态作出结论，并清楚说明哪些
+            行为已经验证、哪些测试失败或受环境阻塞、哪些事项没有验证。
+          pass_condition: >
+            总结准确对应轨迹中可见的命令、测试、输出和退出状态；对修复结果、回归测试、环境
+            问题和未验证边界分别表述，不把没有出现在轨迹中的结果补充为事实，并在存在失败或
+            不确定性时保留相应限制。
+          fail_condition: >
+            总结声称了轨迹没有显示的测试、结果或成功范围，遗漏已显示的失败、异常或环境阻塞，
+            或把局部验证、不完整输出和不确定结果概括为全面完成；也包括使用总结中的自述替代
+            实际命令、输出和退出状态。
+          score: 3
+          positive_examples:
+            - >
+              轨迹中展示了一个定向复现成功、一个相关测试因缺少依赖未运行，以及一个边界场景没有执行。
+              Agent 行为：最终总结分别报告这三项状态，指出定向行为已验证、相关测试受到环境阻塞，
+              并明确边界场景尚未验证；没有把整个测试套件或未出现的结果写成已完成。
+          negative_examples:
+            - >
+              轨迹只展示一个定向 smoke test，相关测试没有运行或输出不完整。
+              Agent 行为：最终总结却写“全部测试通过”“所有边界已覆盖”，没有说明未运行和不可见的部分。
+              总结超出了轨迹能够证明的范围，把局部或不完整证据包装成全面成功。
