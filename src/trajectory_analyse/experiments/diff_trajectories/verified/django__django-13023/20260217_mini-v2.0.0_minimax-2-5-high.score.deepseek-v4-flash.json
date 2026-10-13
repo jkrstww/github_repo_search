@@ -1,0 +1,231 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 14,
+      "max_score": 15,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "steps 8 and 11 (observations)",
+          "observation": "Before any edit, bare `decimal.Decimal({'foo':'bar'})` exits 1 with TypeError, and a settings-configured `DecimalField(max_digits=10, decimal_places=2).to_python({'foo':'bar'})` also prints TypeError: conversion from dict to Decimal is not supported. This matches the issue's stated failure mechanism.",
+          "impact": "supports A-score (issue and success criterion precisely reproduced)"
+        },
+        {
+          "location": "steps 22-23 (observations)",
+          "observation": "After the fix, dict, list, set, object, and bytes inputs raise `django.core.exceptions.ValidationError` with the field's invalid-decimal message, while valid int/float/string/None inputs still convert and invalid string 'invalid' still raises ValidationError.",
+          "impact": "supports A-score (positive/negative acceptance behavior encoded and checked)"
+        },
+        {
+          "location": "step 29 (observation)",
+          "observation": "A model with `decimal_field={'foo':'bar'}` now yields field-level ValidationError through `full_clean()`, while `decimal_field='12.34'` passes; this validates the real-world model scenario described in the issue.",
+          "impact": "supports A-score (model-facing acceptance criterion verified)"
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 14,
+      "max_score": 15,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "steps 5-7, 19 (observations)",
+          "observation": "Read `DecimalField.to_python()` implementation; only `except decimal.InvalidOperation` wraps `return decimal.Decimal(value)`, so the uncaught TypeError from unsupported dict inputs is identified as the leak.",
+          "impact": "supports B-score (root-cause examined at the correct source layer)"
+        },
+        {
+          "location": "steps 8, 12-13, 33-34 (observations)",
+          "observation": "Exception-taxonomy experiments show dict/set/object/bytes -> TypeError, list -> ValueError (coefficient must be a tuple), invalid string -> InvalidOperation; separately, forms.DecimalField was shown to str() its input before conversion, so it is not the vulnerable layer.",
+          "impact": "supports B-score (causal evidence with alternative-layer exclusion)"
+        },
+        {
+          "location": "steps 17-18, 22, 29 (observations)",
+          "observation": "The fix mirrors FloatField.to_python, which already catches `(TypeError, ValueError)`, and post-fix checks confirm those conversion failures now land in ValidationError while valid paths and invalid-string handling remain unchanged.",
+          "impact": "supports B-score (hypothesis validated at responsibility layer)"
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 23,
+      "max_score": 25,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "steps 28 and 35 (git diff and patch.txt)",
+          "observation": "Final patch is a one-line, source-only change in django/db/models/fields/__init__.py: `except decimal.InvalidOperation:` becomes `except (decimal.InvalidOperation, TypeError, ValueError):`, and still raises ValidationError with `code='invalid'`.",
+          "impact": "supports C-score (minimal fix at actual responsibility layer)"
+        },
+        {
+          "location": "steps 22-23 (observations)",
+          "observation": "Post-fix boundary behavior covers dict/list/set/object/bytes as invalid inputs and retains None handling, float handling via `create_decimal_from_float`, valid int/str/float conversions, and invalid-string ValidationError.",
+          "impact": "supports C-score (core semantics and compatibility preserved)"
+        },
+        {
+          "location": "steps 25, 27, 30 (observations)",
+          "observation": "Django's test runner reports `model_fields.test_decimalfield`: Ran 11 tests, OK (skipped=1); whole `model_fields`: OK (skipped=51); `validation`: OK. No collateral regression observed.",
+          "impact": "supports C-score (fix does not break related model-field/validation suites)"
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 22,
+      "max_score": 25,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "steps 11 and 22 (observations)",
+          "observation": "Same reproduction path used before and after fix: pre-fix `field.to_python({'foo':'bar'})` yields TypeError; post-fix equivalent yields ValidationError, and additional list/set/object/bytes checks also yield ValidationError.",
+          "impact": "supports D-score (red-to-green on the issue path and adjacent invalid types)"
+        },
+        {
+          "location": "steps 25, 27, 30 (observations)",
+          "observation": "Real Django runner execution: `model_fields.test_decimalfield` shows individual `test_to_python ... ok` and final 'OK (skipped=1)'; `model_fields` and `validation` suites also show OK; step 29 verifies model-level `full_clean()`.",
+          "impact": "supports D-score (target and related regression suites pass after fix)"
+        },
+        {
+          "location": "verification method (steps 24-27)",
+          "observation": "No official-suite baseline was run before the edit, the extra checks are inline `python -c` scripts rather than committed regression tests, and several verification commands pipe through `tail`/`grep`, so the observed return code is the pipe's return code, not the runner's. No failure text was seen, but these are material evidence gaps.",
+          "impact": "causes small deduction in D-score"
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 8,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 9-10 (observations)",
+          "observation": "`ModuleNotFoundError: asgiref` was correctly diagnosed as environment/dependency failure and resolved with narrowly-scoped `pip install -e .`; reproduction succeeded afterward instead of being masked.",
+          "impact": "supports E-score (error classification and recovery)"
+        },
+        {
+          "location": "steps 24-25 (observations)",
+          "observation": "`pytest` absence was recognized and the agent switched to Django's `tests/runtests.py`, preserving verification intent; post-fix checks and extra model full_clean scenario were iteratively added.",
+          "impact": "supports E-score (feedback-driven execution)"
+        },
+        {
+          "location": "steps 20 and 25-30 (observations)",
+          "observation": "The edit used an unscoped `sed` without checking number of substitutions, and test-command exit statuses are hidden by `| tail`/`| grep`; final diff was verified so impact was limited, but both are discipline risks.",
+          "impact": "causes deduction in E-score"
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 9,
+      "max_score": 10,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "steps 35-36 (observations)",
+          "observation": "`patch.txt` contains exactly the one-line source diff; `git status` shows only `django/db/models/fields/__init__.py` modified plus untracked `patch.txt`, with no test, helper, configuration, or binary changes.",
+          "impact": "supports F-score (clean source-only patch scope)"
+        },
+        {
+          "location": "step 37 (observation)",
+          "observation": "Final submission uses the exact required submit command and prints the previously verified patch; the provided summary text matches the actual diff content.",
+          "impact": "supports F-score (submission protocol and summary consistency)"
+        },
+        {
+          "location": "step 35 and final state (observation)",
+          "observation": "No `git diff --check` or clean-tree `git apply --check` was run; patch creation and viewing were combined in one command rather than being strictly separated, leaving a small auditability gap.",
+          "impact": "causes small deduction in F-score"
+        }
+      ]
+    }
+  },
+  "raw_total_score": 90,
+  "total_score": 90,
+  "evidence_confidence": "high",
+  "caps_or_flags": [],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/db/models/fields/__init__.py"
+      ],
+      "patch_status": "non-empty one-line diff changing `except decimal.InvalidOperation:` to `except (decimal.InvalidOperation, TypeError, ValueError):`; generated by `git diff` into patch.txt; not committed and not applied to a clean tree."
+    },
+    "timeline": [
+      "steps 3-7: located DecimalField in django/db/models/fields/__init__.py and read to_python implementation",
+      "steps 8-11: reproduced TypeError for dict input, installed missing asgiref dependency, then reproduced `field.to_python(dict)` -> TypeError under Django settings",
+      "steps 12-13: characterized exception taxonomy for dict/list/set/object/bytes and valid/invalid strings",
+      "steps 15-19: compared sibling fields (FloatField etc.) to assess expected to_python behavior",
+      "steps 20-21: applied one-line exception-handling fix via sed and verified resulting source",
+      "steps 22-23 and 29: post-fix inline checks show dict/list/set/object/bytes -> ValidationError and model full_clean() with dict -> field ValidationError; valid string still works",
+      "steps 25, 27, 30: ran Django runner modules `model_fields.test_decimalfield`, `model_fields`, and `validation`, all reported OK",
+      "steps 35-37: generated patch.txt, checked git status, submitted with exact submission command"
+    ],
+    "environment": [
+      "Working directory /testbed contains Django source (version identified by `pip install -e .` as Django==3.2)",
+      "Django was initially importable only after `pip install -e .` installed asgiref, sqlparse, and pytz",
+      "pytest is not installed in the environment; Django's `tests/runtests.py` was used instead",
+      "Verification used in-memory SQLite and ad-hoc settings.configure() in inline python commands; no actual test files were created"
+    ],
+    "evidence_gaps": [
+      "No official-suite run was performed on the original code, so only manual inline checks establish the pre-fix red baseline",
+      "All post-fix invalid-value checks are inline commands and were not added as a permanent regression test",
+      "Several test commands pipe output through `tail` or `grep`; the displayed exit status is the pipeline's status rather than the Django runner's status",
+      "Final patch was not applied to a pristine tree and `git diff --check` was not run"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "`DecimalField.to_python(dict)` must raise `django.core.exceptions.ValidationError` instead of `TypeError`, allowing callers to attribute the error to the decimal field",
+      "Model-level validation/full_clean with a DecimalField set to a dict should show a field-specific invalid-decimal ValidationError",
+      "Existing valid inputs (None, int, float, valid numeric strings, Decimal) must still be converted or passed through unchanged"
+    ],
+    "negative_or_compatibility_behavior": [
+      "Invalid non-numeric strings should continue to raise ValidationError, as before",
+      "FloatField, forms.DecimalField, and other field types must keep their existing behavior (forms.DecimalField already stringifies its input, so it was not part of the bug)",
+      "The final patch should remain source-only, with no changes to tests, configuration, or build files"
+    ],
+    "boundaries": [
+      "dict is the reported case; analogous unsupported inputs that trigger TypeError/ValueError include set, object, bytes, and list",
+      "None is handled before conversion; float is handled via `context.create_decimal_from_float`; those code paths must remain unchanged",
+      "The existing `decimal.InvalidOperation` conversion failure for malformed numeric strings must still be converted into ValidationError"
+    ],
+    "forbidden_changes": [
+      "No test files, helper scripts, configuration, or packaging files should be submitted in the final patch",
+      "Returning None, empty string, or silently coercing a dict to a number would not satisfy the issue",
+      "The fix must not globally broaden all field conversions; it is specific to DecimalField.to_python"
+    ],
+    "unknowns": [
+      "Exact upstream/hidden tests are not visible in the trajectory",
+      "Behavior for exotic inputs not exercised here (e.g., tuple-as-Decimal-triple, Decimal subclasses, NaN/Infinity strings, objects implementing __int__/__float__) is not covered by evidence",
+      "The trajectory validates to_python and full_clean, but not an un-validated `Model.save()` DB-write path; model-field get_prep_save calls the same to_python method"
+    ]
+  },
+  "evidence_gaps": [
+    "No official-suite baseline was run before the fix; only manual pre-fix reproductions are present",
+    "No permanent regression test was added for the new dict/ValidationError behavior",
+    "Piped test commands (`| tail`, `| grep`) make underlying runner exit codes unavailable in several steps",
+    "Final patch not applied or checked with `git diff --check` in a clean tree"
+  ],
+  "key_strengths": [
+    "Baseline and post-fix checks exercise the same `DecimalField.to_python()` API path",
+    "Boundary type matrix covers dict, list, set, object, bytes, valid inputs, and invalid strings, distinguishing TypeError, ValueError, and InvalidOperation before and after fix",
+    "The agent ran actual Django test-runner modules and a real model `full_clean()` scenario after the fix, and `git status` confirms source-only scope"
+  ],
+  "key_risks": [
+    "The fix is not accompanied by a committed regression test in this trajectory, so hidden/upstream tests are the main long-term protection",
+    "Some verification output was truncated/grepped, and the observed return codes are those of tail/grep, so a failure segment outside the tailed window would not have been automatically caught",
+    "No formal pre-fix run of the existing test suite was performed; the red side of the proof rests on inline ad-hoc commands only"
+  ],
+  "conclusion": "The final patch is a minimal, source-only one-line change in `DecimalField.to_python()`, matching the issue's required behavior and the pattern already used by `FloatField.to_python()`. Evidence is strong for the dict/TypeError scenario: the same reproduction is red before the fix and green after, with additional type boundaries and model-level full_clean verified, and related Django suites pass after the fix. The trajectory does not add a committed regression test, lacks a pre-fix official-suite baseline, and has some omitted runner exit codes due to piped commands, but no observed failure or counterexample contradicts the stated fix.",
+  "instance": "django__django-13023",
+  "submission": "20260217_mini-v2.0.0_minimax-2-5-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-13023/20260217_mini-v2.0.0_minimax-2-5-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788932447,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}

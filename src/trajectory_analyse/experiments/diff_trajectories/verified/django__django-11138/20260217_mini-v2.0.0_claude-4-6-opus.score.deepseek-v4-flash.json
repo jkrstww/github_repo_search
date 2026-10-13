@@ -1,0 +1,228 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 10,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 8 / step 21 (agent reasoning)",
+          "observation": "准确指出 MySQL `_convert_field_to_tz` 将源时区硬编码为 'UTC'、Oracle 用 '0:00'、SQLite 解析假定存储的 UTC；并给出方向‘DB 时区 → 当前/目标时区’，与 issue 中 tz2→tz1 的描述一致。",
+          "impact": "支持满分"
+        },
+        {
+          "location": "step 22-24 patch内容 + step 49 diff",
+          "observation": "两个需求点（尊重 DB TIME_ZONE；当 db_tz == tzname 时不再包 CONVERT_TZ/FROM_TZ）都被实现：`if db_tz != tzname:`/`if db_tz == tzname: return field_name`。",
+          "impact": "支持验收标准达成"
+        },
+        {
+          "location": "步骤 3-47 全轨迹",
+          "observation": "从未在修复前运行原始复现场景（`filter(field__date=...)` 且 DATABASES.TIME_ZONE≠全局）、也从未写明‘边界矩阵’或‘不修改测试文件’之外的明确非目标；成功标准隐含在实现里。",
+          "impact": "导致扣分，任务边界与复现计划证据不足"
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 11,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 5-11",
+          "observation": "读了三个后端 operations.py、base/base.py 的 timezone/timezone_name cached_property、functions/datetime.py 的 TimezoneMixin.get_tzname→datetime_extract/trunc/cast 调用链。",
+          "impact": "支持根因准确；因果链完整"
+        },
+        {
+          "location": "step 12-20",
+          "observation": "把 SQLite 侧的自定义函数注册、_sqlite_datetime_parse、typecast_timestamp 与 timezone.localtime 的实现读出，确认了 stored value 被当作 aware-UTC 处理的核心前提。",
+          "impact": "支持根因与责任层判断"
+        },
+        {
+          "location": "step 22-29/43-44",
+          "observation": "在代码修改后用试验性脚本验证 3 个 parse 分支和 CONVERT_TZ 字符串；替换前没有跑失败基线或作替代假设排除实验，根因验证以代码阅读+生成SQL单测为主。",
+          "impact": "导致扣分：缺红色失败基线/对照"
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 19,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 22/24/27/29 patch",
+          "observation": "三个后端同时修改，源时区统一改为 connection.timezone_name（缺省回落 UTC），tz1==tz2 时不再产生转换函数，符合 issue 对 MySQL 的原生示例，也复用到 Oracle/SQLite。",
+          "impact": "核心语义与范围基本正确"
+        },
+        {
+          "location": "step 30-31 diff查看",
+          "observation": "sqlite 自定义函数注册 arity 从 2/3 升至 3/4，operations.py 调用方同步传第三/四个参数；_sqlite_datetime_parse 在非 UTC 时先 reinterpret 本地时间再 localtime，改动相互一致且只落在 datetime 转换路径。",
+          "impact": "支持实现一致性"
+        },
+        {
+          "location": "步骤 21-51 可观察事实",
+          "observation": "无法确证边界行为：TIME_ZONE 为空字符串/None 时的 MySQL 语义、Oracle 真实 cx_Oracle 会话、以及 tzname=None 且 USE_TZ=True 的调用方是否真实存在；MySQL 增加 `and tzname` 条件足以覆盖旧路径，但这些分支没有在真实 DB 上验证，被视为残余风险。",
+          "impact": "导致扣分"
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 17,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 46 /tmp/test_fix.py 输出",
+          "observation": "真实断言了 MySQL ops 的 con/target 组合字符串、sqlite cast/extract SQL 参数以及 _sqlite_datetime_parse 三种时区组合（20:50→20:50、18:50 UTC、22:50＋02），输出完整且成功。",
+          "impact": "支持：有反例/边界功能验证"
+        },
+        {
+          "location": "step 43/44/45/47/50",
+          "observation": "db_functions.datetime、timezones、lookup、dates、datetimes、backends 大面积套件在默认配置（conn_tz=UTC）下 636 通过，证明旧语义没有回归。",
+          "impact": "支持：相关回归较充分"
+        },
+        {
+          "location": "step 3-51 无实际复现",
+          "observation": "没有修前基线（NO_BASELINE）：修复前从未演示失败或跑‘同一测试修改前失败/修改后绿’；且核心业务路径（DATABASES.TIME_ZONE 与全局不同时真实 ORM 的 __date/Extract）只以函数单测模拟，没有经 django ORM/SQL 执行。",
+          "impact": "导致严重扣分"
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 7,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 32-42",
+          "observation": "pytz/sqlparse 缺失和模块路径问题被逐步识别并解决——先安装依赖再用 runtests.py；命令均窄而定向，未吞掉任何错误返回。",
+          "impact": "支持：良好的故障排查习惯"
+        },
+        {
+          "location": "step 40/41",
+          "observation": "多次尝试测试路径失败（cd tests 后找不到 django、先跑 module 级再找正确 runner），迭代效率稍低但很快修正。",
+          "impact": "轻微扣分"
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 7,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 48-49 + 51 patch.txt",
+          "observation": "最终补丁只含 4 个后端源码文件，无测试/辅助脚本/中间文件，patch 非空且 diff 显示完整；提交命令使用要求的 `echo COMPLETE... && cat patch.txt`，步骤分离清晰。",
+          "impact": "支持：补丁范围与提交协议正确"
+        },
+        {
+          "location": "步骤 48-51",
+          "observation": "没有运行 `git status`/`git diff --check`/`git apply --check`，也无法确认 patch.txt 里的 diff 是否在全新 repo 上干净可应用。",
+          "impact": "导致扣分；可审计性证据不完整"
+        }
+      ]
+    }
+  },
+  "raw_total_score": 71,
+  "total_score": 71,
+  "evidence_confidence": "medium",
+  "caps_or_flags": [
+    "NO_BASELINE"
+  ],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/db/backends/mysql/operations.py",
+        "django/db/backends/oracle/operations.py",
+        "django/db/backends/sqlite3/operations.py",
+        "django/db/backends/sqlite3/base.py"
+      ],
+      "patch_status": "non-empty diff displayed; 未验证 git apply --check"
+    },
+    "timeline": [
+      "step 3-4: 搜索并读取 MySQL/SQLite/Oracle operations.py",
+      "step 5-11: 定位 connection.timezone/timezone_name 及 datetime_cast/extract/trunc 调用链",
+      "step 12-20: 阅读 sqlite 自定义函数、parse 语义与 typecast_timestamp",
+      "step 22-29: 以脚本修改 MySQL/Oracle/SQLite 源码",
+      "step 30-31: sed 核对改动",
+      "step 32-43: 修补环境依赖并确认测试运行方式",
+      "step 43-50: 多个回归套件（共 636 tests）通过",
+      "step 46: 自定义函数级验证脚本通过",
+      "step 48-51: 生成补丁、展示并按规定提交"
+    ],
+    "environment": [
+      "/testbed，git HEAD a647b9a3e1 SWE-bench 基线",
+      "python3.11 / opt/miniconda3，测试入口 tests/runtests.py",
+      "运行中安装 pytz/sqlparse 并执行 pip install -e .",
+      "仅 SQLite 实库可运行；MySQL/Oracle 无真实服务，只有代码级断言"
+    ],
+    "evidence_gaps": [
+      "从未运行 issue 原始失败复现（DATABASES.TIME_ZONE≠全局时 `field__date` 查询返回 False）的红色基线",
+      "修复后没有在真实 ORM/DB 上执行同一业务断言（只有 ops 层函数与 SQL 字符串断言）",
+      "Oracle/MySQL 改动仅靠字符串生成验证，未覆盖真实连接行为与空/无效 TIME_ZONE 边界",
+      "未执行 git status、git diff --check 或 apply-check，最终提交可审计性凭证缺失"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "MySQL/SQLite/Oracle 的 datetime 转换应从 DATABASES['TIME_ZONE']（默认 UTC）出发转换到当前时区",
+      "当数据库时区与当前时区相同时不应生成 CONVERT_TZ/FROM_TZ 或等价转换，避免依赖 MySQL tz 表"
+    ],
+    "negative_or_compatibility_behavior": [
+      "USE_TZ=False 时不引入任何时区转换（保留旧语义）",
+      "未配置 DB TIME_ZONE（None）时保持原先 UTC 语义，避免回归",
+      "sqlite 自定义函数 arity 与生成 SQL 必须同步变化，不能只改一边"
+    ],
+    "boundaries": [
+      "db_tz == tzname：跳过转换",
+      "db_tz=UTC 未显式设置：仍使用 'UTC'/utc",
+      "USE_TZ False：所有转换逻辑被短路"
+    ],
+    "forbidden_changes": [
+      "不应修改测试/配置文件或提交 helper 脚本",
+      "不应改动无数据库时区语义的 date/time（非 datetime）函数",
+      "不允许破坏 mysql/oracle/sqlite 默认路径的既有 SQL 形状"
+    ],
+    "unknowns": [
+      "该版本各后端真实 features.supports_timezones/session timezone 行为（Oracle 未运行）",
+      "TIME_ZONE=''/非 IANA 值 时 MySQL 生成 CONVERT_TZ 的失败模式",
+      "对 GIS/spatialite 继承类的影响未观察"
+    ]
+  },
+  "evidence_gaps": [
+    "缺少修复前红色基线与修复后同路径绿色验证（NO_BASELINE）",
+    "没有真实 ORM 查询脚本验证 `__date` 最终 SQL 与结果正确性",
+    "Oracle 与 MySQL 无真实 driver 环境说明字段（仅有生成字符串断言）",
+    "没有补丁的 `git apply --check`/`git diff --check` 记录"
+  ],
+  "key_strengths": [
+    "准确识别了 MySQL/Oracle/SQLite 三处硬编码 UTC 的责任层",
+    "修复方案通用且对称：引入 connection.timezone_name 并在时区相同时跳过转换",
+    "没有污染最终补丁：仅 4 个源码文件，测试与辅助脚本均被排除",
+    "在默认 UTC 配置下用大范围回归（636 tests）证明无旧行为回归"
+  ],
+  "key_risks": [
+    "核心问题只在非默认时区下成立，但该配置无端到端验证，D 维证据断层",
+    "Oracle 在真实会话下 FROM_TZ 与 db_tz 的方言兼容性未验证",
+    "空 TIME_ZONE/非 IANA 值时可能在 DB 层产生 SQL 错误；代码与流程均未覆盖",
+    "修复后没有失败基线或对照实验，无法排除改变行为仅‘不报错’的假成功"
+  ],
+  "conclusion": "最终补丁方向与工作原理可信：三个后端的转换源时区统一改为连接级 TIME_ZONE，并在相等时省略转换，符合 issue 描述；代码内部各调用点、函数 arity 和 SQL 生成保持一致，默认配置下的大回归测试通过。但整个过程缺乏修复前的可失败复现以及修复后同一业务路径的真实 DB 断言，Oracle/MySQL 现场未验证，因此该补丁更应被视为‘实现逻辑正确但端到端证据不完全’，需要补充 red→green 的 ORM 级测试才能达到高置信。",
+  "instance": "django__django-11138",
+  "submission": "20260217_mini-v2.0.0_claude-4-6-opus",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-11138/20260217_mini-v2.0.0_claude-4-6-opus.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788930720,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}

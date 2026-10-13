@@ -1,0 +1,229 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 11,
+      "max_score": 15,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 9-12 / reproduce_issue.py 注释",
+          "observation": "创建了结合 filter/exclude/~Q 三个场景的复现脚本，并把 exclude(book_alice__isnull=False)（以及 filter(~Q(...))）的期望语义与 filter 对照，能区分‘发起错误的失败模式’与‘成功条件’。",
+          "impact": "支持：对问题的正向/反例理解基本准确。"
+        },
+        {
+          "location": "step 19-21 自建 TestCase",
+          "observation": "在 tests/test_exclude_issue.py 中显式写出两种等价的验收断言（exclude 与 ~Q 都应返回排除后的 author2/Jane），并先运行看到 FieldError 复现。",
+          "impact": "支持：复现计划具体，不是只复述 traceback。"
+        },
+        {
+          "location": "step 22 之后的多轮结论及 step 40/61 分析",
+          "observation": "意识到 split_exclude 构造子查询丢失 annotation/FilteredRelation 元数据，后续又明确指出 trim_start 把带 FilteredRelation 的 Join 转 BaseTable 会丢失 ON 条件——比 PR 描述深一层。",
+          "impact": "支持：对失败机制理解到位。"
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 13,
+      "max_score": 15,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 4-8, 29-39, 50-61",
+          "observation": "沿 build_filter→split_exclude→names_to_path→trim_start 通读 Query 源码，并用 DEBUG 打印确认转换 BaseTable 时 Join 携带的 filtered_relation 条件被丢弃。",
+          "impact": "支持：建立了数据/别名/状态因果链；多个候选修复被复盘并回退。"
+        },
+        {
+          "location": "step 21-28",
+          "observation": "完成修前红测：FieldError 精确复现；复制 _filtered_relations 后错误从 FieldError 变为空 QuerySet 结果错误，证明该假设不够，继续验证 trim_start 层。",
+          "impact": "支持：区分了‘名称找不到’与‘条件被丢’两层根因。"
+        },
+        {
+          "location": "step 43, 64",
+          "observation": "中间两版补丁各自产生新回归（SQL 语法错误或丢失条件），agent 都据此回退并更新假设，而不是坚持不可行方案。",
+          "impact": "支持：责任层定位得到最终修正并通过排除实验证实。"
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 3,
+      "max_score": 25,
+      "level": "missing",
+      "evidence": [
+        {
+          "location": "step 62-75",
+          "observation": "修改集中在真实责任层 django/db/models/sql/query.py：split_exclude 复制 _filtered_relations，trim_start 中把将失去 ON 约束的 FilteredRelation 条件加入子查询 WHERE；自定义 exclude/~Q 用例与 filtered_relation 全量回归转绿。",
+          "impact": "支持：对报告主场景语义（排除匹配者）有效。"
+        },
+        {
+          "location": "step 75 最终 SQL 输出",
+          "observation": "生成的 SQL 中过滤条件同时出现在 JOIN ON 与子查询 WHERE（U1.title LIKE 两处），语义重复且未经评审，反映实现并非最小且对深层/链式场景缺少针对性反例验证。",
+          "impact": "扣分：实现存在冗余与泛化风险。"
+        },
+        {
+          "location": "步骤列表尾部（step 77 后无任何后续）",
+          "observation": "轨迹中不存在 git diff、patch.txt、COMPLETE_TASK 提交或最终总结，最终 patch 内容、可应用性、是否遗漏 producer 均不可审验。",
+          "impact": "封顶：最终交付物缺失，C 上限执行至 3。"
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 13,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 21 / step 28",
+          "observation": "修前在同一测试文件中复现原始 FieldError，并用等价 exclude/~Q 双用例展示红测（返回 [] 而非期望 author2）。",
+          "impact": "支持：存在真正的修前失败基线与同路径断言。"
+        },
+        {
+          "location": "step 75-77",
+          "observation": "修后同一用例转绿，并运行 filtered_relation 全量 31 项回归全部 OK（仅 1 个特性跳过），验证未破坏已有 FilteredRelation 行为。",
+          "impact": "支持：目标灰度和相关回归证据较完整。"
+        },
+        {
+          "location": "step 77 后轨迹终止",
+          "observation": "已验证代码仅是与工作区最终状态一致的中间状态；没有对最终提交内容的再验证、无 git diff/状态校验，也没有跨数据库或多别名/深层 FilteredRelation 的边界用例。",
+          "impact": "扣分并用于总分封顶调平：D 因最终 patch 无法与验证对应而非满值。"
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 7,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 9-12, 18",
+          "observation": "复现受阻时准确归类为环境缺依赖（pytz、sqlparse）并以 pip install -e /testbed 修复，随后使用项目自身的 runtests.py。",
+          "impact": "支持：环境故障与代码故障区分清楚。"
+        },
+        {
+          "location": "step 40-61",
+          "observation": "每轮错误（语法 SQL、空集、语义缺失）驱动新假设，多次 git checkout 回退调试补丁，并向正确解迭代，命令大多窄且保留输出/返回码。",
+          "impact": "支持：反馈驱动迭代。"
+        },
+        {
+          "location": "step 9-12, 15-17, 19-21, 45-53 等多处",
+          "observation": "存在重复无效尝试（pytest 不存在后仍辗转多个 runner、多次独立调试脚本报同样 import 错误）、全局安装和临时文件残留，收尾也没有状态检查。",
+          "impact": "扣分：执行中冗余和资源消耗较多。"
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 2,
+      "max_score": 10,
+      "level": "missing",
+      "evidence": [
+        {
+          "location": "step 9-21, 41, 51-52, 62",
+          "observation": "工作区遗留 reproduce_issue.py、tests/test_exclude_issue.py、patch_trim_start.py、patch_debug*.py、debug_trim_start.py、apply_fix*.py 等辅助/复现文件，且未做任何清理或提交隔离。",
+          "impact": "扣分：未达到干净收尾要求。"
+        },
+        {
+          "location": "全部步骤中 grep/分析",
+          "observation": "未观察到 git status、git diff --check、patch 生成或 COMPLETE_TASK 提交步骤；轨迹在最后一次测试 OK 后终止，最终交付物为空缺状态。",
+          "impact": "封顶与整体扣分：F 上限 2，总分同时受限。"
+        }
+      ]
+    }
+  },
+  "raw_total_score": 54,
+  "total_score": 49,
+  "evidence_confidence": "low",
+  "caps_or_flags": [
+    "EMPTY_PATCH",
+    "NO_POST_FIX_TEST",
+    "KNOWN_COUNTEREXAMPLE"
+  ],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/db/models/sql/query.py"
+      ],
+      "patch_status": "missing-final-patch-not-submitted"
+    },
+    "timeline": [
+      "step 3-8: 定位 split_exclude / 通读 Query 相关代码",
+      "step 9-12: 首次复现失败，安装 pytz/sqlparse 后脚本因 related_name 用错而失败",
+      "step 13-18: 读取 tests/filtered_relation models 与既有测试，配置 runtests 环境并验证 test_with_join 通过",
+      "step 19-21: 用 FilteredRelation('book') 建立自测，红测复现 FieldError: Cannot resolve keyword 'book_alice'",
+      "step 22-28: 尝试复制 _filtered_relations，错误变为空结果（而非期望 [author2]）",
+      "step 29-61: 深入 trim_start / change_aliases / BaseTable，判断 ON 条件在 Join→BaseTable 中丢失；多版调试补丁被回退",
+      "step 62-75: v3 补丁（复制 _filtered_relations + trim_start 内将条件加入 WHERE）后 exclude 红转绿",
+      "step 76-77: 新增 ~Q 用例通过，filtered_relation 全量 31 测试 OK；轨迹结束，无 patch/提交步骤"
+    ],
+    "environment": [
+      "/testbed 下 Django 源码仓库（git 工作区）",
+      "python3.11 + sqlite 内存库，Django 通过 pip install -e /testbed 注册",
+      "已安装 pytz、sqlparse（agent 全局 pip）",
+      "测试以 cd /testbed/tests && python runtests.py ... --parallel=1 形式运行"
+    ],
+    "evidence_gaps": [
+      "轨迹没有最终 patch 文本、patch.txt 内容或 COMPLETE_TASK 提交，无法审计实际交付物",
+      "没有修前基线针对最终代码状态的精确对照（红测与最终绿测之间存在中间代码差异）",
+      "缺少 git diff/状态快照与临时文件清理检查，存在环境/测试杂项进入提交物风险",
+      "没有覆盖多 FilteredRelation、链式/deep 排除、无匹配行作者等边界反例"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "对带 FilteredRelation 注解的查询运用 exclude(annotation__isnull=False) 或 filter(~Q(annotation__isnull=False)) 时，应对应于排除匹配条件关系的行",
+      "排除逻辑应生成合法 SQL 且返回与 filter 相反语义的集合"
+    ],
+    "negative_or_compatibility_behavior": [
+      "既有 filter(book_alice__isnull=False) 行为保持不变",
+      "非 FilteredRelation 的常规 exclude/split_exclude 行为不变",
+      "select_related/values 等既有 filtered_relation 回归不得破坏"
+    ],
+    "boundaries": [
+      "作者无任何书籍/外连接为空时的空值处理",
+      "同一查询多个不同 FilteredRelation 注解并通过 exclude 引用",
+      "深层链式关系上的 exclude 与 MultiJoin 修剪路径",
+      "filter(~Q(...)) 与 .exclude(...) 语义等价性"
+    ],
+    "forbidden_changes": [
+      "不得修改测试文件、配置文件（pyproject.toml/setup.cfg 等）",
+      "不得将复现/辅助脚本或工具纳入最终补丁"
+    ],
+    "unknowns": [
+      "最终提交补丁的具体 diff 与是否只含授权源码文件",
+      "修复在全量 Django 回归套件中的表现（只跑了 filtered_relation 子集）",
+      "Oracle 在真实 Django 上游测试中的精确期望行集（此处按数据推演与非空作者语义判断）"
+    ]
+  },
+  "evidence_gaps": [
+    "最终 patch 未生成/未提交是核心缺口，影响 C/D/F 和总分可信度",
+    "复制 _filtered_relations 的新增行（step 62-75）未单独做定位隔离实验，无法排除它单独无效/仅起次要作用",
+    "验证覆盖限于 filtered_relation 子目录，未对 queryset 全文、exclude 嵌套等关键调用链做回归"
+  ],
+  "key_strengths": [
+    "根因分析深入：从 split_exclude 逐步定位到 Join→BaseTable 转换丢弃 FilteredRelation 条件",
+    "在最终修复前完成了真实业务路径的失败复现（FieldError）和红→绿闭环",
+    "通过 DEBUG 打印与逐步回退形成有效因果实验，最终修复得到 31+ 回归用例支持"
+  ],
+  "key_risks": [
+    "缺少最终 patch 和提交步骤——在评审中视为无收尾交付，总分受封顶限制（≤49）",
+    "生成的子查询 SQL 中条件重复出现在 ON 与 WHERE，实现风格不干净且深层场景未验证",
+    "存在确定性反例（修前空集排除语义错误）经多次尝试后才修复，若以最终状态评估则早期版本留有严重正确性缺口",
+    "大量临时文件与测试脚本未清理，存在环境/测试文件混入补丁风险"
+  ],
+  "conclusion": "轨迹中间过程质量较高：问题定位准确、修前红测与修后全量 filtered_relation 回归一致，证实了对报告主场景的基本修复。但评审可观察轨迹没有产生或提交任何最终 patch，亦无 git 状态/差异检查，故交付物缺失、不具备可审计性；受空补丁封顶影响 C=3、F=2、总分 49。最终修复在真实层上是否完全通用（深层/多注解/多别名）及 SQL 重复条件是否可接受，仍缺乏边界证据，结论置信度低。",
+  "instance": "django__django-11265",
+  "submission": "20260217_mini-v2.0.0_claude-4-5-opus-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-11265/20260217_mini-v2.0.0_claude-4-5-opus-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788930787,
+    "parse_ok": true,
+    "valid": true,
+    "retried": true,
+    "reason": ""
+  }
+}

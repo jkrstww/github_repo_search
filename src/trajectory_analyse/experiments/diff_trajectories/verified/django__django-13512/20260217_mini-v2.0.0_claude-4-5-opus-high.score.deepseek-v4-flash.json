@@ -1,0 +1,266 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 13,
+      "max_score": 15,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 5-6 / django/forms/fields.py:1258-1261",
+          "observation": "Agent reads forms.JSONField and identifies that `prepare_value()` calls `json.dumps(value, cls=self.encoder)` without `ensure_ascii=False`, correctly stating the PR's root cause.",
+          "impact": "Supports score: precise reproduction statement of failure mechanism."
+        },
+        {
+          "location": "step 11 (pre-fix repro)",
+          "observation": "Custom reproducer prints 'x FAILURE: Unicode characters are escaped as ASCII!' with actual output `{\"name\": \"\\\\u4e2d\\\\u56fd\"}` before modification.",
+          "impact": "Supports score: red baseline for the exact rendering path."
+        },
+        {
+          "location": "step 15 (post-fix repro)",
+          "observation": "Reproducer after fix outputs `{\"name\": \"中国\"}` and reports 'SUCCESS'; extended cases cover Chinese, Japanese, Korean, Arabic, Russian, emoji, nested lists, plain strings, None, and InvalidJSONInput.",
+          "impact": "Supports score: acceptance criterion 'unicode chars appear literally' was made concrete and executable."
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 13,
+      "max_score": 15,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 4-6",
+          "observation": "Searched for `json.dumps` call-sites and JSONField usages, then inspected the exact `prepare_value` method instead of changing an arbitrary JSON dump.",
+          "impact": "Supports score: found responsible layer within forms field rendering."
+        },
+        {
+          "location": "step 11 -> step 14",
+          "observation": "Causal verification: before fix `json.dumps` returns `\\u4e2d\\u56fd`; after adding `ensure_ascii=False` same call returns `中国`.",
+          "impact": "Supports score: demonstrated that `ensure_ascii` is the controlling variable on the actual failing path."
+        },
+        {
+          "location": "step 5-7 / admin contribution",
+          "observation": "Agent did not inspect model field form wiring or admin/widget path in depth; reasoning ends at `forms.fields.JSONField.prepare_value` without reading callers.",
+          "impact": "Moderate deduction: fix is nonetheless in the rendering layer used by the admin form field."
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 23,
+      "max_score": 25,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 12-13 / diff line 1261",
+          "observation": "Minimal one-line source change: `return json.dumps(value, ensure_ascii=False, cls=self.encoder)`, applied only in `forms.JSONField.prepare_value`.",
+          "impact": "Supports score: broad in scope, exact in responsibility layer (used by editable textarea widgets in admin) and consistent with code style."
+        },
+        {
+          "location": "step 15",
+          "observation": "Additional checks confirm custom encoder is preserved (`cls=self.encoder` remains), None still becomes `null`, strings/numbers serialise, and InvalidJSONInput passes through unchanged.",
+          "impact": "Supports score: legal JSON output and existing contract appear to be kept for normal and invalid inputs."
+        },
+        {
+          "location": "step 19",
+          "observation": "Existing forms JSONField field-test suite `test_custom_encoder_decoder`, `test_prepare_value`, `test_has_changed`, `test_invalid`, `test_redisplay_wrong_input`, etc., passes (12 tests OK).",
+          "impact": "Supports score: no observed regression in the API surface most likely affected by `prepare_value`."
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 20.5,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 11 / step 14",
+          "observation": "Same reproduction script was run before and after the fix: failing output is visible before, `中国` visible after (`✓ SUCCESS`).",
+          "impact": "Supports score: classic red-to-green on the exact identified call path."
+        },
+        {
+          "location": "step 15",
+          "observation": "Extended scenario matrix covers several scripts, CJK and non-CJK Unicode, emoji, nested containers, invalid input, and empty value; output is displayed in full and clearly asserts the unicode behaviour.",
+          "impact": "Supports score: meaningful border/negative coverage, not just one smoke case."
+        },
+        {
+          "location": "step 19",
+          "observation": "Existing JSONField forms tests run via `tests/runtests.py` produce `Ran 12 tests ... OK` and the relevant tests all pass.",
+          "impact": "Supports score: related regression suite invoked."
+        },
+        {
+          "location": "step 11 / test scripts",
+          "observation": "Reproduction scripts never call `sys.exit(1)` on assertion mismatch, and commands often pipe into `head` without `set -o pipefail`; the scripts' visible output is definitive, but exit codes could mask failures if automation relies on return code only.",
+          "impact": "Causes deduction: evidence completeness is high visually, but not fully process-machine-verifiable."
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 10,
+      "max_score": 10,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 7-11",
+          "observation": "Missing dependencies (`asgiref`, `pytz`) were recognised as environment issues and installed; the repro was rerun after each correction, finally producing the intentional failing result.",
+          "impact": "Supports score: failure classification (dependency vs business-logic) was correct; errors were not masked."
+        },
+        {
+          "location": "step 16-19",
+          "observation": "Test runner errors (`forms_tests` label, missing `django` import) were resolved by using proper `tests/runtests.py` and running `pip install -e .`, rather than altering source or ignoring the failures.",
+          "impact": "Supports score: harness issues were distinguished from fix issues and resolved narrowly."
+        },
+        {
+          "location": "step 12 / 20 / 21",
+          "observation": "The source edit was one precise replacement verified by inspection; temporary repro files were deleted before patch creation; only the intended source file appears in the patch.",
+          "impact": "Supports score: tight edit discipline and no leftover tooling in patch."
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 9.5,
+      "max_score": 10,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 20",
+          "observation": "`rm /testbed/test_unicode.py /testbed/test_unicode_extended.py` removes both debug/repro scripts before submission.",
+          "impact": "Supports score: clean state, temporary artifacts not included in patch."
+        },
+        {
+          "location": "step 21-22",
+          "observation": "`git diff -- django/forms/fields.py > patch.txt` then `cat patch.txt` shows a single file changed with one-line `ensure_ascii=False` hunk and proper `--- a/` / `+++ b/` headers.",
+          "impact": "Supports score: patch non-empty and scoped to only the declared source file."
+        },
+        {
+          "location": "step 23",
+          "observation": "Exact submission command (`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt`) is used; no commit was made.",
+          "impact": "Supports score: final protocol compliant."
+        }
+      ]
+    }
+  },
+  "raw_total_score": 89,
+  "total_score": 89,
+  "evidence_confidence": "high",
+  "caps_or_flags": [],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/forms/fields.py"
+      ],
+      "patch_status": "non-empty and applicable (one-line diff replacing `json.dumps(value, cls=self.encoder)` with `json.dumps(value, ensure_ascii=False, cls=self.encoder)`)"
+    },
+    "timeline": [
+      "step 3-4: directory/codebase reconnaissance; grep for JSONField and json.dumps",
+      "step 5-6: read `django/forms/fields.py`, isolated `forms.JSONField.prepare_value`",
+      "step 7-11: install missing deps `asgiref`/`pytz`, run reproducer; observed failing escaped output and printed red FAILURE",
+      "step 12-13: applied one-line fix `ensure_ascii=False`",
+      "step 14: rerun same reproducer: observed `中国` and SUCCESS",
+      "step 15: extended unicode/edge-case script, all pass",
+      "step 16-19: attempt/repair Django test runner (`forms_tests`, `runtests.py`, `pip install -e .`); existing JSONField forms tests 12/12 OK",
+      "step 20-22: remove temporary test scripts, create and inspect `patch.txt`",
+      "step 23: submit via exact command"
+    ],
+    "environment": [
+      "Django source repo at /testbed",
+      "Linux shell, Python environment initially missing `asgiref`, `pytz`, `sqlparse`",
+      "Additional installs made during session: `pip install asgiref`, `pytz`, `sqlparse`, `pip install -e .`",
+      "Untracked repro files at /testbed/test_unicode.py and /testbed/test_unicode_extended.py, removed before submission"
+    ],
+    "evidence_gaps": [
+      "No `git status` or `git diff --check` verification appears in the trajectory, so exact untracked/state cleanliness is inferred only from patch output",
+      "No admin-level UI/HTTP test and no model/DB round-trip test were executed after the fix; only the forms layer `prepare_value` is directly asserted",
+      "Custom reproduction scripts did not terminate non-zero on their failure branch, and several commands used piped output without `set -o pipefail`, so process exit codes do not by themselves prove success/failure"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "When rendering a Django/Joseph form JSONField for admin display, non-ASCII characters should appear as literal Unicode in the textarea value instead of `\\uXXXX` escapes.",
+      "Output of `prepare_value` remains valid JSON "
+    ],
+    "negative_or_compatibility_behavior": [
+      "Existing JSON semantics (order of keys, `sort_keys` in `has_changed`, nested containers) should remain intact",
+      "No behavioural regression in `prepare_value` of plain ASCII values, None, or serialized numbers",
+      "Invalid user input (`InvalidJSONInput`) must still be passed through as-is",
+      "Custom encoder and decoder kwargs of the JSON form field must continue to work"
+    ],
+    "boundaries": [
+      "Unicode characters are expected in dict string values and list items, and in nested containers",
+      "Py encoding such as emoji and CJK must display literally, not as escapes",
+      "Non-string Python primitives (int, None, etc.) serialize normally"
+    ],
+    "forbidden_changes": [
+      "No test file, configuration file, or unrelated source file should be changed",
+      "Temporary repro/helper scripts should not be included in the final patch"
+    ],
+    "unknowns": [
+      "Exact admin widget/HTTP rendering was not observed in the session, so a hypothetical admin layer that independently re-escapes Unicode cannot be ruled out from evidence alone",
+      "The pre-existing full test suite result across all affected model JSON fields is not visible; only forms JSONField tests were run",
+      "External gold verdict/canonical patch is not part of the trajectory"
+    ]
+  },
+  "evidence_gaps": [
+    {
+      "location": "step 11 / repro script",
+      "observation": "The reproducer prints 'FAILURE' but does not exit with a nonzero code when its assertion fails.",
+      "impact": "The semantic red condition is observable in stdout, but not machine-enforced via return code; D-score was slightly reduced."
+    },
+    {
+      "location": "step 19 output",
+      "observation": "The runtests command output is piped to `head -100`; the visible 'Ran 12 tests ... OK' is sufficient here, but the command has no `pipefail` guard.",
+      "impact": "Evidence completeness is judged from captured text; a future failure occurring after the head window could be hidden."
+    },
+    {
+      "location": "post-steps 19-23",
+      "observation": "No admin-level or database-level integration run, and no `git diff --check`/git-status audit, appears after the final patch.",
+      "impact": "Leaves a small residual risk on real admin rendering and repository cleanliness."
+    }
+  ],
+  "key_strengths": [
+    {
+      "location": "step 6 / step 12 / step 22",
+      "observation": "The final one-line diff targets the exact rendering path (`forms.JSONField.prepare_value`) and is the smallest viable change matching the PR goal."
+    },
+    {
+      "location": "step 11 vs step 14",
+      "observation": "Correct red-to-green demonstration on the same reproduction flow, with direct observable output of `\\u4e2d\\u56fd` -> `中国`."
+    },
+    {
+      "location": "step 15 / step 19",
+      "observation": "Structured edge-case matrix plus existing JSONField regression suite (12 tests OK) provide strong behavioural evidence for a one-line rendering change."
+    }
+  ],
+  "key_risks": [
+    {
+      "location": "step 11 / test scripts",
+      "observation": "Custom scripts report success/failure via stdout only; failures do not affect the process return code, so output must be parsed to know the true outcome."
+    },
+    {
+      "location": "all verification steps",
+      "observation": "No end-to-end check of the Django admin HTML page or a full model form submission was made; only `prepare_value` behaviour is asserted.",
+      "impact": "We cannot prove with repository artifacts that no other helper in the admin path re-applies ASCII escaping."
+    },
+    {
+      "location": "step 21",
+      "observation": "Patch was created without an explicit `git status`/`git diff --check` audit; nonetheless, the emitted patch shows a single source file.",
+      "impact": "Minor residual hygiene risk, already reflected in the F-score."
+    }
+  ],
+  "conclusion": "The trajectory correctly identifies and fixes the unicode-display issue in the rendering path of the admin JSONField by adding `ensure_ascii=False` to the same `json.dumps` call that caused the escaping. The reproducer demonstrates a clear failed-before and successful-after behaviour, while the existing forms JSONField tests remain green, so the final patch is highly credible as the official one-liner fix. Main caveats are that the custom repro scripts encode their pass/fail verdict in stdout text rather than strict exit codes, and no admin-page or DB round-trip integration test was executed; those boundaries remain paper-only evidence. Overall, the delivered change appears minimal, correctly layered, and consistent with the stated PR requirements.",
+  "instance": "django__django-13512",
+  "submission": "20260217_mini-v2.0.0_claude-4-5-opus-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-13512/20260217_mini-v2.0.0_claude-4-5-opus-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788932850,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}

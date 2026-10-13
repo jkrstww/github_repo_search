@@ -1,0 +1,271 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 9,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step02 用户任务 / step08 第一段复现",
+          "observation": "准确复现了 PR 中的 traceback（message.py forbids_multi_line_headers 对 iso-8859-1 编码 Message-ID 时抛 UnicodeEncodeError），并正确理解为主机名/DNS_NAME 非 ASCII 导致。",
+          "impact": "支持得分：问题现象、触发条件和预期（punycode）表述清楚。"
+        },
+        {
+          "location": "step10 / step42 / step45",
+          "observation": "将修复放在 CachedDnsName.get_fqdn() 中做 IDNA 转换，并指出 ASCII 主机名应保持不变；后续用 ASCII/混合域名验证了兼容性。",
+          "impact": "支持“需保留旧行为”的部分得分。"
+        },
+        {
+          "location": "step11",
+          "observation": "按 PR 描述字面使用的补丁方式 `patch(\"django.core.mail.message.DNS_NAME\", \"漢字\")` 在修复后仍然失败且完全相同的 traceback，agent 未最终解释或修复这一条验收路径。",
+          "impact": "扣分：验收标准覆盖不完整，存在已知反例未被解决。"
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 10,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step03-step07 / step38-step39",
+          "observation": "阅读 utils.py、message.py 与 SMTP 调用者，确认 DNS_NAME 同时用于 Message-ID 和 SMTP local_hostname，建立了 主机名→CachedDnsName→make_msgid→header 编码的因果链。",
+          "impact": "支持调用链与上下文分析。"
+        },
+        {
+          "location": "step08 / step20-step23 / step31-step35",
+          "observation": "先复现失败；然后通过 patch socket.getfqdn、构造新的 CachedDnsName 验证 get_fqdn 能把 漢字/正宗/混合域名转为 punycode，EmailMessage 可正常产生含 xn-- 的 Message-ID。",
+          "impact": "支持因果实验与责任层验证。"
+        },
+        {
+          "location": "step11-step13",
+          "observation": "发现 `patch('django.core.mail.message.DNS_NAME', '漢字')` 仍失败后，将失败归因为“只替换了字符串、绕过了 CachedDnsName”，但没有回归考虑“message.DNS_NAME 被直接替换为非 ASCII 字符串是否仍应工作”这一 PR 展示的反例场景。",
+          "impact": "扣分：替代解释/边界责任层判断不完整。"
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 6,
+      "max_score": 25,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "step10 / step42 最终 patch",
+          "observation": "utils.py 中 CachedDnsName.get_fqdn() 对非 ASCII FQDN 做 `fqdn.encode('idna').decode('ascii')`，ASCII 路径不变；该改动对实际主机名为非 ASCII 的场景是正确且最小。",
+          "impact": "支持核心语义修复，但受已知反例封顶。"
+        },
+        {
+          "location": "step11 输出",
+          "observation": "最终工作区下，PR 描述中提供的直接复现代码仍以相同 UnicodeEncodeError 失败（DNS_NAME 被直接替换为 '漢字'，修复未经过该路径）。",
+          "impact": "触发 KNOWN_COUNTEREXAMPLE / 原始复现仍失败的硬性封顶（C≤6）。"
+        },
+        {
+          "location": "step23 / step35 / step39-step40",
+          "observation": "验证了对消息生成和 SMTP 使用者的 FQDN 影响，ASCII、混合域名、缓存行为均通过；但未覆盖 Message-ID 通过 extra_headers 或 DNS_NAME 直接赋非 ASCII 字符串等泛化输入。",
+          "impact": "边界/泛化局限。"
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 8,
+      "max_score": 25,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "step08 与 step11",
+          "observation": "有修复前基线（step08 复现失败），但修复后再次运行完全相同的命令仍然红（step11 同 traceback），没有做到 PR 反例的 red→green。",
+          "impact": "修前修后同测得分低，并触发原始复现仍失败的 D≤8 封顶。"
+        },
+        {
+          "location": "step23 / step31 / step35 / step45",
+          "observation": "补充了大量带断言的临时 Python 测试：ASCII、漢字、正宗、混合域名、UTF-8 编码、SMTP、缓存行为；这些测试在 socket.getfqdn patch 的场景下均通过。",
+          "impact": "支持反例/边界与真实业务路径的部分得分。"
+        },
+        {
+          "location": "step28 / step36 / step41 / step44",
+          "observation": "多次运行 `tests/runtests.py mail`，162 个 mail 测试均通过，输出完整为 OK；但该套件不包含本 issue 的回归测试（grep 未发现 test_unicode_dns/CachedDnsName 相关用例）。",
+          "impact": "提供相关回归证据，但缺少针对修复目标的可审计正式测试。"
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 8,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step15-step28",
+          "observation": "依赖缺失（asgiref、pytz、sqlparse、pytest）被逐个诊断并安装，没有盲目忽略；随后正确使用 tests/runtests.py 执行测试。",
+          "impact": "支持错误分类与恢复。"
+        },
+        {
+          "location": "step10 / step12-step13 / step32-step35",
+          "observation": "大部分命令目的明确，读取和测试命令交替；发现“正宗”的固定 punycode 预期错误后，改为用 `'正宗'.encode('idna').decode('ascii')` 动态计算预期并重测。",
+          "impact": "支持反馈驱动迭代。"
+        },
+        {
+          "location": "step16-step25 / step28",
+          "observation": "全局 pip 安装了多个包并执行了 `pip install -e .`，虽为补齐环境所需，但属于对环境较宽泛的改动；部分长命令通过 tail 截断但整体返回码与 OK 仍可见。",
+          "impact": "轻微扣分：效率和全量输出保留不完美。"
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 9,
+      "max_score": 10,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step42-step43 / step46",
+          "observation": "最终 `git diff` 只包含 django/core/mail/utils.py 的预期修改；patch.txt 使用 `git diff -- utils.py > patch.txt` 生成且内容被检查，头尾为 `--- a/`、`+++ b/`。",
+          "impact": "补丁范围正确、可应用且非空。"
+        },
+        {
+          "location": "step43-step47",
+          "observation": "创建/查看 patch 与最终提交命令分开执行，最终使用规定的 `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt` 提交。",
+          "impact": "提交协议符合指令。"
+        },
+        {
+          "location": "step42 / 环境证据缺口",
+          "observation": "未执行 `git status` 和 `git diff --check`，root 下遗留 patch.txt 未清理；不过 patch.txt 为提交用途且不在 patch 中。",
+          "impact": "轻微扣分：状态检查与清理不完整。"
+        }
+      ]
+    }
+  },
+  "raw_total_score": 63,
+  "total_score": 50,
+  "evidence_confidence": "medium",
+  "caps_or_flags": [
+    "KNOWN_COUNTEREXAMPLE",
+    "MAIN_CASE_ONLY"
+  ],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/core/mail/utils.py"
+      ],
+      "patch_status": "non-empty; generated via git diff; patch target is CachedDnsName.get_fqdn with IDNA punycode branch for non-ASCII hostnames"
+    },
+    "timeline": [
+      "step03-step07: locate DNS_NAME usage and read message.py/utils.py/smtp.py relevant sections",
+      "step08: reproduce PR failure via patching django.core.mail.message.DNS_NAME to '漢字' and iso-8859-1 encoding",
+      "step10: edit django/core/mail/utils.py CachedDnsName.get_fqdn to IDNA encode non-ASCII fqdn",
+      "step11: rerun exact step08 snippet; same UnicodeEncodeError failure persists",
+      "step15-step27: install missing asgiref/pytz/pytest and editable Django to enable tests",
+      "step22-step23/step31-step35: custom assertions with socket.getfqdn patching for ASCII/漢字/正宗/mixed labels/caching; all pass after using dynamic expected punycode",
+      "step28/step36/step41/step44: tests/runtests.py mail runs 162 tests OK",
+      "step42-step43: git diff inspected; patch.txt created containing only utils.py change",
+      "step45: final combination test using socket patch and CachedDnsName instance; Message-ID contains xn--p8s937b; assertion passed",
+      "step47: submit with exact final command"
+    ],
+    "environment": [
+      "Container /testbed with Django 3.0.dev source; Python 3.11 from /opt/miniconda3",
+      "Initially missing asgiref, pytz, pytest, sqlparse; agent pip-installed them and ran `pip install -e .`",
+      "Actual hostname in container is ASCII (c2fcbd185a95); all non-ASCII scenarios are simulated by patching socket.getfqdn or CachedDnsName behavior",
+      "Tests/mail/tests.py in repo does not contain the issue-specific regression test; hidden test not present in trajectory"
+    ],
+    "evidence_gaps": [
+      "No final-state rerun of the exact PR snippet using `patch('django.core.mail.message.DNS_NAME', '漢字')`; step11 indicates it would still fail",
+      "No evidence about official/gold hidden test assertions for django__django-11532, so it is unknown whether the official FAIL_TO_PASS test patches socket.getfqdn or message.DNS_NAME literal",
+      "No `git status` or `git diff --check` output at end; patch.txt cleanup not verified",
+      "Fix correctness for invalid IDNA hostnames or extra_headers with unicode Message-ID is untested"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "When FQDN/DNS_NAME contains non-ASCII characters, EmailMessage.message() with encoding='iso-8859-1' must not raise UnicodeEncodeError",
+      "Generated Message-ID domain must be punycode/ASCII-compatible, e.g. contains 'xn--p8s937b' for 漢字",
+      "Normal ASCII hostnames must continue producing unchanged ASCII Message-IDs and SMTP local_hostname behavior"
+    ],
+    "negative_or_compatibility_behavior": [
+      "ASCII FQDN values and caching behavior in CachedDnsName must be preserved",
+      "SMTP backend local_hostname should remain valid after IDNA conversion",
+      "No test files, config files, or third-party code should be included in the source patch"
+    ],
+    "boundaries": [
+      "Unicode hostnames: '漢字' and '正宗'",
+      "Mixed labels such as 'mail.漢字.com'",
+      "Both iso-8859-1 and utf-8 email encodings",
+      "Repeated calls to get_fqdn should cache punycode result"
+    ],
+    "forbidden_changes": [
+      "Modifying tests (DO NOT MODIFY tests or config files per instructions)",
+      "Changing unrelated code or masking errors with pipes/`|| true`"
+    ],
+    "unknowns": [
+      "Whether official hidden tests patch `django.core.mail.message.DNS_NAME` as a literal unicode string or patch `socket.getfqdn`/CachedDnsName",
+      "Whether the official fix is expected at CachedDnsName.get_fqdn only or also at message-header layer",
+      "No access to final clean-repo application of patch or full CI result"
+    ]
+  },
+  "evidence_gaps": [
+    {
+      "location": "step11 vs final state",
+      "observation": "Exact PR reproduction command with `patch('django.core.mail.message.DNS_NAME', '漢字')` failed after the fix and was never re-run from the final workspace; agent later used a different patching strategy (socket.getfqdn→CachedDnsName instance) that passes.",
+      "impact": "Directly undermines confidence that the documented acceptance test would pass."
+    },
+    {
+      "location": "tests/mail/tests.py (grep step29-step30)",
+      "observation": "Repository contains no test_unicode_dns or CachedDnsName-DNS_NAME regression test; hidden official test is not visible in trajectory.",
+      "impact": "Cannot verify whether final patch satisfies the official FAIL_TO_PASS test."
+    },
+    {
+      "location": "final patch only modifies utils.py",
+      "observation": "No change to message.py's Message-ID/make_msgid/header-encoding path; any caller that provides a raw non-ASCII DNS_NAME/Message-ID string still crashes.",
+      "impact": "Scoping question: whether such input is part of the task remains unresolved."
+    }
+  ],
+  "key_strengths": [
+    {
+      "location": "step08-step10 + step42",
+      "observation": "Pre-fix reproduction was clear and final patch was minimal, placed in CachedDnsName.get_fqdn — the shared FQDN source for Message-ID and SMTP.",
+      "impact": "This is a plausible general fix for non-ASCII hostnames and is consistent with the PR suggestion to fix in django.core.mail.utils."
+    },
+    {
+      "location": "step23-step35 + step45",
+      "observation": "Multiple custom assertion scripts covered ASCII, 漢字, 正宗, mixed labels, caching, SMTP, and utf-8/iso-8859-1 encodings; after self-correcting the expected punycode they all passed.",
+      "impact": "Substantial behavioral evidence for the fixed hostname-simulation path."
+    },
+    {
+      "location": "step28/36/41/44 + step42-step43",
+      "observation": "Full mail suite (162 tests) repeatedly passed, and the final diff/patch contained only django/core/mail/utils.py with no test/config contamination.",
+      "impact": "Good regression baseline and patch hygiene on the modified source layer."
+    }
+  ],
+  "key_risks": [
+    {
+      "location": "step11",
+      "observation": "The exact PR-style reproducer (patch message.DNS_NAME with unicode string) still produced the original UnicodeEncodeError after the fix; this is a deterministic unresolved counterexample.",
+      "impact": "If official hidden test uses that literal patch style, the final patch will fail the task; caps KNOWN_COUNTEREXAMPLE and original-reproduction-still-failing were applied."
+    },
+    {
+      "location": "utils.py only / message.py unchanged",
+      "observation": "The fix only helps when non-ASCII DNS_NAME flows through CachedDnsName.get_fqdn; plain-string imports or direct unicode Message-ID values still reach `forbid_multi_line_headers` with no punycode layer.",
+      "impact": "Scoped to real hostname scenario, not to all non-ASCII Message-ID domain inputs described in the reproduction snippet."
+    },
+    {
+      "location": "untracked patch.txt/pip environment",
+      "observation": "patch.txt was left in the workspace and global pip installs were performed; final git status and diff --check output were never shown.",
+      "impact": "Minor auditability/clean-room concern, not affecting source diff itself."
+    }
+  ],
+  "conclusion": "最终补丁在“真实主机名通过 CachedDnsName→socket.getfqdn 产生非 ASCII FQDN”的路径上是正确且克制的：它在 utils.py 中把非 ASCII FQDN 转为 punycode，并用自定义断言和完整 mail 套件验证了多数正常/边界场景。但 PR 描述/展示的验收复现（直接用 `patch('django.core.mail.message.DNS_NAME', '漢字')` 替换为 unicode 字符串）在修复后依然保持相同失败，且 agent 未最终解决或解释该反例。因此无法认定补丁完全满足给定的验收标准；若官方隐藏测试采用该复现写法，本补丁会失败。补丁只能视为对实际主机名路径的可信修复，而非对任务描述中完整反例的可信修复，需补充 message/DNS_NAME 层的 IDNA 处理或明确排除该输入方式。",
+  "instance": "django__django-11532",
+  "submission": "20260217_mini-v2.0.0_minimax-2-5-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-11532/20260217_mini-v2.0.0_minimax-2-5-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788931447,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}

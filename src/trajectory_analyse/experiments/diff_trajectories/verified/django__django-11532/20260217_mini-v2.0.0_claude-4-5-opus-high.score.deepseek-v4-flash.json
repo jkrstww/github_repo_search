@@ -1,0 +1,266 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 12,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 6-7",
+          "observation": "修复前按 PR 场景复现：patch('django.core.mail.message.DNS_NAME', '漢字') + encoding='iso-8859-1' 得到 'latin-1' codec can't encode characters ...，与 issue traceback 同类",
+          "impact": "支持：明确失败机制是在非 ASCII 域名写入 Message-ID 时被 latin-1 重新编码"
+        },
+        {
+          "location": "steps 16 and 28",
+          "observation": "验证标准明确为 Message-ID 含 'xn--p8s937b'（对应 PR 测试断言），修复后打印成功",
+          "impact": "支持：验收标准来自 issue 的可执行断言"
+        },
+        {
+          "location": "step 30",
+          "observation": "补充 ASCII 域名不回归、非 ASCII 域名在 UTF-8 下也使用 punycode 的测试",
+          "impact": "部分支持：正例覆盖较全，但对负例/兼容矩阵的说明较少"
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 11.5,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 10-11",
+          "observation": "只在 CachedDnsName 中做 idna 转换后，同一复现脚本仍然报错（因为测试 patch 的是 message.DNS_NAME 别名，绕过 CachedDnsName）",
+          "impact": "支持：用因果实验排除了单纯在 DNS_NAME 源头上修复对这一复现路径无效，确认责任点在 message.py 使用处"
+        },
+        {
+          "location": "steps 22, 23, 26-27",
+          "observation": "全量 mail 测试暴露 AttributeError: 'CachedDnsName' object has no attribute 'encode'，agent 据此识别 DNS_NAME 是对象、需要 str() 并修正",
+          "impact": "支持：通过真实故障输出修正了错误假设，形成对象/字符串类型的因果链"
+        },
+        {
+          "location": "step 3 vs 12-13",
+          "observation": "grep 显示 DNS_NAME 还被 smtp.py、__init__.py 引用，但 agent 从未阅读这些调用方，最终同时在 utils 和 message 两层修改",
+          "impact": "扣分：改造共享对象前未核实全部调用者，导致最终是两层冗余修法"
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 21.5,
+      "max_score": 25,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "final patch (step 33)",
+          "observation": "message.py 在生成 Message-ID 前 domain=str(DNS_NAME)，非 ASCII 时 domain.encode('idna').decode('ascii')；utils.py 的 get_fqdn 缓存前也做同样转换",
+          "impact": "支持：两条真实路径（真实 hostname 与 message.DNS_NAME 被直接 patch 成字符串）都能得到 ASCII punycode domain"
+        },
+        {
+          "location": "steps 16/28/29/30",
+          "observation": "复现脚本通过、mail 套件 162 个测试 OK、ASCII hostname 的 Message-ID 仍为原样域名（46cb61f3ac89）",
+          "impact": "支持：核心语义正确，ASCII 正常路径行为保持不变，未破坏既有 mail 行为"
+        },
+        {
+          "location": "final patch utils.py + message.py",
+          "observation": "idna 转换逻辑被复制到 CachedDnsName.get_fqdn 与 message() 中，两处职责重叠；且未阅读 smtp.py 对 DNS_NAME 的使用",
+          "impact": "扣分：改动不是最小单一责任点，共享对象层和使用层的重复逻辑需要维护两处"
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 21,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 7 (前) vs step 28 (后)",
+          "observation": "同一内联断言路径：修复前 UnicodeEncodeError，修复后 SUCCESS 且 Message-ID 含 xn--p8s937b，且步骤 16 中显式检查包含关系",
+          "impact": "支持：red→green 在同一业务路径上成立"
+        },
+        {
+          "location": "step 29",
+          "observation": "python tests/runtests.py mail 显示 Ran 162 tests ... OK，覆盖 test_unicode_headers/test_safe_mime_multipart/test_idn_send 等真实回归路径",
+          "impact": "支持：有真实业务回归，但不是 issue 中 test_unicode_dns 被单独命中的证据；输出仅 tail-80，且命令通过管道，返回码可能来自 tail",
+          "impact_extra": "风险：基线/目标测试名无法确认是否在本套件内；162 个 OK 可能与 hostname 为 ASCII 时该测试平凡通过一致"
+        },
+        {
+          "location": "step 30",
+          "observation": "第三个边界测试的 TestDnsName 子类自己复制并执行了修复逻辑，而不是让真实 CachedDnsName 面对非 ASCII socket 返回值",
+          "impact": "扣分：所谓边界测试是自证式/同义反复，未真正验证 get_fqdn 在真实非 ASCII hostname 下的行为"
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 8.5,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 18-21",
+          "observation": "依次遇到 pytest 缺失、asgiref 缺失、Django module not found，均正确归类为环境问题，并用 pip install -e . 恢复",
+          "impact": "支持：区分环境故障与代码故障，路径切换合理"
+        },
+        {
+          "location": "steps 22-29",
+          "observation": "全量测试失败后迅速回退 message.py 改动、重查类型、重新应用 str(DNS_NAME) 修正并复跑同一套件",
+          "impact": "支持：失败驱动迭代有效，最终状态被真实测试确认"
+        },
+        {
+          "location": "steps 8-9, 14, 24, 26",
+          "observation": "原样重写 utils.py、复杂 sed -i 再改写、用临时脚本整体替换文件块，存在冗余命令和不必要风险；所有输出保留且无 || true 吞错",
+          "impact": "扣分：编辑过程较绕，但命令都有目的且返回码/原始输出可见"
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 8.5,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 32-34",
+          "observation": "git diff 仅针对 django/core/mail/message.py 与 utils.py 生成 patch.txt，内容非空且只含源码改动；提交命令为要求的 echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt",
+          "impact": "支持：补丁范围干净，未混入测试/临时文件，提交协议正确"
+        },
+        {
+          "location": "steps 32-33",
+          "observation": "未执行 git status / git diff --check，直接生成补丁；提交步骤本身无 observation，无法确认提交命令的回显",
+          "impact": "扣分：缺少仓库状态和空白错误的最终核验记录，提交回显缺失"
+        }
+      ]
+    }
+  },
+  "raw_total_score": 83,
+  "total_score": 83,
+  "evidence_confidence": "medium",
+  "caps_or_flags": [],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/core/mail/message.py",
+        "django/core/mail/utils.py"
+      ],
+      "patch_status": "patch.txt 已生成并在 step 33 完整展示，两个源文件 diff 非空、可读"
+    },
+    "timeline": [
+      "step 3-5：定位 DNS_NAME 定义/使用，阅读 utils.py 与 message.py 关键区段",
+      "step 7：修改前按 PR 场景复现 UnicodeEncodeError（latin-1）",
+      "step 10：先在 utils.CachedDnsName 加 idna 转换，复现仍失败",
+      "step 14：在 message.py 使用处加 idna 转换（先未 str()），复现通过但全量 mail 测试报 AttributeError",
+      "step 24-27：回退后改为 str(DNS_NAME) 再转换，复现通过",
+      "step 29：tests/runtests.py mail 全部 162 个测试 OK",
+      "step 30：ASCII 域名/UTF-8 下非 ASCII 域名等边界冒烟",
+      "step 32-34：生成并展示 patch.txt，执行提交命令"
+    ],
+    "environment": [
+      "仓库 /testbed（Django 源码树，tests/ 存在）",
+      "python=django 起初未被 sys.path 覆盖，后 pip install -e . 成功",
+      "pytest、asgiref 起初缺失，runtests.py 可用",
+      "临时文件均在 /tmp，未写入仓库",
+      "邮件套件通过 tests/runtests.py mail 运行"
+    ],
+    "evidence_gaps": [
+      "无法确认本仓库 tests/mail/tests.py 中是否包含 issue 引用的 test_unicode_dns；162 测试 OK 时 hostname 为 ASCII，该测试若存在会平凡通过",
+      "runtests 输出为 tail-80 截断，命令经管道执行，显示 returncode 0 可能来自 tail 而非 runtests",
+      "最终提交工具调用（step 34）缺少 observation，未留下完成回显",
+      "没有用真实非 ASCII socket hostname 端到端验证 CachedDnsName.get_fqdn 的新逻辑（step 30 的边界测试是同义反复）",
+      "DNS_NAME 在 smtp.py/__init__.py 的使用未被阅读，SMTP 影响仅由套件间接覆盖"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "EmailMessage 默认生成 Message-ID 时，非 ASCII 域名（如 '漢字'）必须被 IDNA 转换为 xn-- 形式",
+      "当 email.encoding='iso-8859-1' 等非 UTF 编码使消息头被强制重编码时，message() 不得抛 UnicodeEncodeError",
+      "Message-ID 头值应为纯 ASCII，且包含 'xn--p8s937b'（对 '漢字'）"
+    ],
+    "negative_or_compatibility_behavior": [
+      "ASCII hostname 的 Message-ID 格式<time.pid.random@hostname> 不得改变（无 punycode 前缀）",
+      "现有邮件头（To/Subject/Comments 等）在 iso-8859-1 下编码为 =?iso-8859-1?...?= 的行为保持",
+      "邮件地址中已存在的 IDN 处理（如 sanitize_address 中对 domain 的 idna 逻辑）不受影响"
+    ],
+    "boundaries": [
+      "单标签非 ASCII 域名 '漢字' / '正宗'",
+      "带 ASCII 后缀的国际化域名（如 '正宗.example.com'）",
+      "直接 patch django.core.mail.message.DNS_NAME 为字符串时，绕过 CachedDnsName 仍须成功",
+      "默认 UTF-8 编码下非 ASCII 域名也应产生 punycode 的 Message-ID"
+    ],
+    "forbidden_changes": [
+      "不得修改测试文件（tests/mail/tests.py 等）",
+      "不得改动 pyproject.toml/setup.cfg 等配置",
+      "不应引入额外第三方依赖"
+    ],
+    "unknowns": [
+      "评测隐含测试的具体 patch 目标模块（django.core.mail.message.DNS_NAME vs django.core.mail.utils.DNS_NAME）",
+      "真实评测环境的 hostname 是否非 ASCII",
+      "smtp.py/__init__.py 中对 DNS_NAME 的消费方式"
+    ]
+  },
+  "evidence_gaps": [
+    {
+      "location": "step 29",
+      "observation": "runtests.py mail 输出仅 tail-80，且通过管道执行；虽文本显示 Ran 162 tests OK，returncode 可能来自 tail 而非测试进程",
+      "impact": "全量回归证据完整度降低"
+    },
+    {
+      "location": "step 22, 29",
+      "observation": "无法确认 issue 中的 test_unicode_dns 是否在本仓库套件中并被真正执行（hostname=ASCII 时该测试本就通过）",
+      "impact": "目标测试的独立绿/红未从套件输出直接证实，只能依赖内联复现"
+    },
+    {
+      "location": "step 34",
+      "observation": "提交命令无 observation 回显，patch 内容仅在 step 33 被 cat 展示",
+      "impact": "最终提交是否成功未被轨迹证实"
+    }
+  ],
+  "key_strengths": [
+    {
+      "location": "step 7 与 step 28",
+      "observation": "同一 PR 场景在修改前稳定复现 Latin-1 UnicodeEncodeError，修改后稳定通过并显式检查 xn--p8s937b",
+      "impact": "建立了可信的 red→green 因果验证"
+    },
+    {
+      "location": "step 10-11 对比",
+      "observation": "仅改 CachedDnsName 后复现仍失败，证明需在 message.DNS_NAME 使用点处理",
+      "impact": "排除错误责任层，促使最终两路径都被覆盖"
+    },
+    {
+      "location": "step 22/23/26-27",
+      "observation": "全量 mail 套件及时暴露对象无 .encode 的回归，agent 正确修正为 str(DNS_NAME) 后重跑至 OK",
+      "impact": "真实回归测试避免了交付损坏的 ASCII 主路径"
+    }
+  ],
+  "key_risks": [
+    {
+      "location": "final patch",
+      "observation": "idna 逻辑在 utils.CachedDnsName 与 message.message() 两处重复，属于非最小改动",
+      "impact": "长期维护需同步两处；未阅读 smtp.py 等调用方，共享 DNS_NAME 语义变化影响未逐点确认"
+    },
+    {
+      "location": "step 30 边界测试",
+      "observation": "Test 3 的子类自行复制修复逻辑，未用真实 CachedDnsName 面对非 ASCII socket 值",
+      "impact": "对真实主机名路径的验证是间接的"
+    },
+    {
+      "location": "step 29/34",
+      "observation": "套件输出截断、管道退出码可能被 tail 掩盖，提交无回显",
+      "impact": "最终交付的审计证据不完整"
+    }
+  ],
+  "conclusion": "最终补丁可信：它精确修复了 issue 描述的失败机制（非 ASCII hostname/DNS_NAME 生成 Message-ID 时被 latin-1 重编码抛错），采用与代码库既有 sanitize_address 一致的 IDNA 惯用法，并为‘真实 CachedDnsName’与‘直接 patch message.DNS_NAME 字符串’两条路径都提供了保护。验证证据包括修改前的稳定复现、修改后的同路径 red→green、以及 162 个 mail 模块真实测试 OK，期间还通过套件发现并修复了中间版本对 ASCII 主路径的回归。未验证边界主要是：真实非 ASCII socket hostname 下的端到端行为仅被间接覆盖，评测中隐含的 test_unicode_dns 未在轨迹内被单独确认；此外补丁在 utils 与 message 两层的 IDNA 逻辑重复，属非最小改动。综上，该过程证据充分但存在少量审计缺口，总分 83/100。",
+  "instance": "django__django-11532",
+  "submission": "20260217_mini-v2.0.0_claude-4-5-opus-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-11532/20260217_mini-v2.0.0_claude-4-5-opus-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788931125,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}

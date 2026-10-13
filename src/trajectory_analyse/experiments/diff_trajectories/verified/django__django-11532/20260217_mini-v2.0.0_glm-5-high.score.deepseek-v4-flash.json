@@ -1,0 +1,283 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 11,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 12",
+          "observation": "使用修改前的源码，模拟 socket.getfqdn() 返回 '漢字' 后 email.message() 抛出 UnicodeEncodeError: 'latin-1' codec can't encode characters in position 38-39，复现了 PR 描述的崩溃路径。",
+          "impact": "支持得分：准确复现失败机制。"
+        },
+        {
+          "location": "step 14-15",
+          "observation": "修复后将 Message-ID 断言为包含 'xn--p8s937b' 并打印 PASS，成功标准与 PR 中给出的断言一致。",
+          "impact": "支持得分：明确可执行成功标准。"
+        },
+        {
+          "location": "step 16, step 44",
+          "observation": "ASCII hostname 'example.com' 保持原样，已 punycode 的 'xn--p8s937b' 不被二次转换。",
+          "impact": "支持得分：关注了需保留的 ASCII/已 punycode 语义。"
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 14,
+      "max_score": 15,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 3-6, 47-49",
+          "observation": "阅读 utils.py、message.py、smtp.py 与 smtplib 文档，建立 DNS_NAME -> make_msgid -> forbid_multi_line_headers/Header.encode() 的完整调用链，并发现 SMTP local_hostname 也是同一 DNS_NAME 的消费者。",
+          "impact": "支持得分：责任层定位基于调用链和消费方分析。"
+        },
+        {
+          "location": "step 12 vs 15",
+          "observation": "同一复现脚本在修改前抛出 'latin-1' UnicodeEncodeError，在修改后成功生成含 'xn--p8s937b' 的 Message-ID。",
+          "impact": "支持得分：同一路径的 red→green 因果实验。"
+        },
+        {
+          "location": "step 13, 68",
+          "observation": "先在独立脚本中验证 '漢字'.encode('idna') -> 'xn--p8s937b'；后又 grep 确认 message.py 的 sanitize_address() 已对地址域使用相同 idna 模式。",
+          "impact": "支持得分：选择的修复方式与仓库既有 IDNA 处理一致，排除了在 message.py 中另行编码的替代方案。"
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 23,
+      "max_score": 25,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 14, 15, 38",
+          "observation": "在 CachedDnsName.get_fqdn() 中把非 ASCII fqdn 转为 punycode；原复现脚本显示 Message-ID 为 <...@xn--p8s937b>，运行成功。",
+          "impact": "支持得分：核心修复正确且影响两个消费方（Message-ID 与 SMTP EHLO）。"
+        },
+        {
+          "location": "step 16, 44, 58",
+          "observation": "ASCII hostname 保持 'example.com'，已是 punycode 的 hostname 仍为 'xn--p8s937b'，验证了幂等性和兼容性。",
+          "impact": "支持得分：主流边界被覆盖。"
+        },
+        {
+          "location": "step 59, 64",
+          "observation": "修复后 mail.tests 全部 157 个测试 OK，test_idn_send 单独通过，未见回归。",
+          "impact": "扣分点：未完成德文/西里尔等多语言域名和 IDNA 异常（如非法 punycode、超长 label）的实际执行验证。"
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 20,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 12",
+          "observation": "修复前运行 /tmp/test_issue.py 输出完整 UnicodeEncodeError traceback，但脚本用 try/except 打印 FAIL 后以 returncode 0 结束，缺少强 red 基线。",
+          "impact": "扣分点：失败被捕获且退出码不非零，削弱基线证据。"
+        },
+        {
+          "location": "step 15, 38, 58",
+          "observation": "同一复现脚本在修复后多次运行均打印 SUCCESS/PASS 且 Message-ID 含 'xn--p8s937b'。",
+          "impact": "支持得分：同路径修后 green。"
+        },
+        {
+          "location": "step 16, 44, 59, 64, 27",
+          "observation": "ASCII 域、已 punycode 域、完整 mail.tests（157 OK）、test_idn_send 均通过；但仓库中未发现针对本 bug 的 test_unicode_dns 现成测试，最终补丁也不含新增回归测试。",
+          "impact": "扣分点：缺少对最终修复的仓库级针对性回归测试。"
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 6,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 9, 11, 12, 25, 27",
+          "observation": "对 ModuleNotFoundError、AttributeError、ImproperlyConfigured、真实 UnicodeEncodeError、错误 settings 模块逐一分类并修正，最终切换到 tests/runtests.py 正确运行。",
+          "impact": "支持得分：错误分类和工具选择逐步收敛。"
+        },
+        {
+          "location": "step 28-36, 40-41, 45-46, 50-55, 60, 66, 69",
+          "observation": "约 20 个 bash 命令为畸形 JSON/片段，均以 127 command not found 失败；step 23 中 python -m django test 失败被 `| head -200` 掩盖成 returncode 0。",
+          "impact": "扣分点：命令纪律差，大量步骤被浪费；管道掩盖失败返回码。"
+        },
+        {
+          "location": "step 14-16, 44, 58, 59",
+          "observation": "修复后依次补充 ASCII、已 punycode、全套 mail 回归验证，有反馈驱动迭代。",
+          "impact": "支持得分：验证的迭代方向合理。"
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 9,
+      "max_score": 10,
+      "level": "excellent",
+      "evidence": [
+        {
+          "location": "step 71, 74",
+          "observation": "git status 显示仅 django/core/mail/utils.py 被修改；git diff --stat 为 1 file changed, 7 insertions(+), 1 deletion(-)。",
+          "impact": "支持得分：无环境/测试等无关文件进入工作区。"
+        },
+        {
+          "location": "step 72-73",
+          "observation": "生成的 /tmp/patch.txt 只包含 utils.py 的源码 diff，headers 为 `--- a/` 和 `+++ b/`，可应用。",
+          "impact": "支持得分：补丁范围与内容符合要求。"
+        },
+        {
+          "location": "step 75",
+          "observation": "使用题目指定的提交命令 `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt` 提交。",
+          "impact": "扣分点：未执行 `git diff --check`；除提交命令外没有文字性总结。"
+        }
+      ]
+    }
+  },
+  "raw_total_score": 83,
+  "total_score": 83,
+  "evidence_confidence": "high",
+  "caps_or_flags": [],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/core/mail/utils.py"
+      ],
+      "patch_status": "created and inspected; only source fix, no test/unrelated files"
+    },
+    "timeline": [
+      "step 3-6: 搜索并阅读 mail/utils.py, message.py, smtp.py 中 DNS_NAME/make_msgid 相关代码",
+      "step 7-12: 构造 /tmp/test_issue.py，排除环境/配置问题后经 socket.getfqdn mock 复现 UnicodeEncodeError 'latin-1'",
+      "step 13-14: 验证 IDNA 转换并修改 CachedDnsName.get_fqdn() 加入 punycode 编码",
+      "step 15-16: 修复后复现脚本 PASS；ASCII 域脚本 PASS",
+      "step 22-27: 发现 pytest 不可用、tests.settings 不存在，改用 tests/runtests.py；mail.tests 部分用例通过",
+      "step 28-36, 40-46, 50-55, 60, 66, 69: 大量畸形 bash 命令失败 (returncode 127)",
+      "step 44, 58: 验证已 punycode hostname 不被二次转换；三个自建脚本全 PASS",
+      "step 59-64: mail.tests 全套 157 tests OK；test_idn_send 单独 OK",
+      "step 71-75: git status/diff 检查，生成并提交 patch"
+    ],
+    "environment": [
+      "工作目录 /testbed，Python 3.11 (/opt/miniconda3)",
+      "初始未安装 django，agent 执行 pip install -e . -q",
+      "无 pytest；正确测试入口为 python tests/runtests.py mail.tests"
+    ],
+    "evidence_gaps": [
+      "step 12 的 red 基线脚本 catch 异常并以 returncode 0 结束，未提供非零退出码的强失败信号",
+      "step 23 `python -m django test ... | head -200` 把失败 traceback 的返回码掩盖成 0（head 成功）",
+      "仓库 tests/mail/tests.py 中没有找到本 PR 所述的 test_unicode_dns；轨迹中无针对该补丁的仓库级正式回归测试",
+      "多语言/其他非 ASCII 域名（münchen.de, россия.рф, 正宗 等）的 comprehensive 测试因畸形命令从未成功执行",
+      "未运行 git diff --check；DNS_NAME 全局导出后返回值由 Unicode 变为 punycode，未评估外部调用者影响"
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "当 socket.getfqdn() 返回非 ASCII hostname（如 '正宗'/'漢字'）且 EmailMessage.encoding='iso-8859-1' 时，email.message() 必须成功",
+      "生成的 Message-ID 头中 domain 部分必须是 punycode（如 'xn--p8s937b'）"
+    ],
+    "negative_or_compatibility_behavior": [
+      "ASCII hostname（如 example.com）时 Message-ID 中的 domain 保持原样",
+      "已经是 punycode 的 hostname（如 xn--p8s937b）不得被二次编码",
+      "IDN 邮箱地址（from@öäü.com 等）的已有 punycode 转换不得被破坏",
+      "SMTP local_hostname 也应保持 ASCII 可发送（EHLO）"
+    ],
+    "boundaries": [
+      "非 ASCII 单标签（漢字）、多字节域名、混合大小写",
+      "已含 xn-- 的 ASCII 域幂等性",
+      "IDNA 编码失败/非法 label 的场景（未验证）",
+      "DNS_NAME 缓存首次读取前替换 socket.getfqdn"
+    ],
+    "forbidden_changes": [
+      "修改测试文件或向补丁中加入测试/临时脚本",
+      "向最终补丁写入环境/配置文件修改"
+    ],
+    "unknowns": [
+      "当前仓库版本中是否真的存在 PR 引用行 368 的 test_unicode_dns 及其最终测试断言",
+      "官方评测测试集是否通过（轨迹未运行外部隐藏测试）",
+      "对依赖 DNS_NAME 返回原始 Unicode 主机名的外部用户是否构成行为破坏"
+    ]
+  },
+  "evidence_gaps": [
+    {
+      "location": "step 12",
+      "observation": "red 基线的脚本把异常放进 try/except 并打印 FAIL，shell returncode 为 0。",
+      "impact": "修前失败缺少非零退出码的强信号，只能靠文本确认。"
+    },
+    {
+      "location": "step 23",
+      "observation": "`python -m django test tests.mail.tests --settings=tests.settings ... | head -200` 显示 traceback 但 returncode 为 0。",
+      "impact": "管道末端 head 掩盖了真实失败返回码，属于证据缺口。"
+    },
+    {
+      "location": "step 61, 62",
+      "observation": "仓库 mail/tests.py 中 grep 未发现 test_unicode_dns；没有针对本 bug 的仓库现有用例被运行。",
+      "impact": "目标回归依赖 agent 自建脚本而非仓库正式测试。"
+    },
+    {
+      "location": "step 28-36",
+      "observation": "构造 comprehensive 多域名测试的命令全部畸形，从未产出可执行 Python 文件。",
+      "impact": "德文/西里尔等 IDNA 边界未被真实验证。"
+    }
+  ],
+  "key_strengths": [
+    {
+      "location": "step 14-15",
+      "observation": "修复放在 CachedDnsName.get_fqdn()，使 Message-ID 与 SMTP local_hostname 两个消费者都获得 ASCII/punycode domain。"
+    },
+    {
+      "location": "step 12 vs 15",
+      "observation": "同一自建脚本完成 red→green：修改前 UnicodeEncodeError，修改后生成含 xn--p8s937b 的 Message-ID。"
+    },
+    {
+      "location": "step 16, 44, 59, 64",
+      "observation": "ASCII 域、已 punycode 域、完整 mail.tests 157 ok、test_idn_send 均通过，兼容性证据充足。"
+    },
+    {
+      "location": "step 72",
+      "observation": "最终 patch 仅修改一个源文件（+7/-1），范围小、格式正确、可审计。"
+    }
+  ],
+  "key_risks": [
+    {
+      "location": "step 28-36, 40-46, 50-55, 60, 66, 69",
+      "observation": "约二十次畸形 bash 命令 (127 command not found) 占据大量步骤，表明命令生成/格式不稳定。",
+      "impact": "削弱执行纪律评分，并使得 comprehensive 测试与 SMTP 行为测试缺失。"
+    },
+    {
+      "location": "step 23",
+      "observation": "一次测试命令失败被 `| head -200` 管道掩盖成 returncode 0。",
+      "impact": "可能造成对失败状态的误判，但后续正确改用 runtests.py。"
+    },
+    {
+      "location": "step 61-63 仓库无 test_unicode_dns",
+      "observation": "最终没有在仓库测试框架中留下针对本 bug 的回归测试（受指令限制未改测试文件）。",
+      "impact": "未来回归只能依赖上游测试集；本轨迹未能展示隐藏评测测试结果。"
+    },
+    {
+      "location": "多语言边界未执行",
+      "observation": "münchen.de、россия.рф、正宗 等官方/边界案例从未有可执行输出。",
+      "impact": "IDNA 泛化性未完全验证，可能出现未知编码异常。"
+    },
+    {
+      "location": "django/core/mail/utils.py",
+      "observation": "DNS_NAME 是 mail.__init__ 导出项，get_fqdn() 返回值从潜在 Unicode 变为 punycode。",
+      "impact": "外部代码如果依赖 str(DNS_NAME) 返回原始 Unicode hostname，将产生行为变化，本轨迹未评估该外部兼容性。"
+    }
+  ],
+  "conclusion": "最终补丁在 django/core/mail/utils.py 的 CachedDnsName.get_fqdn() 中把非 ASCII hostname 转成 punycode，从根因上修复了非 ASCII 主机名 + 非 unicode 编码下 Message-ID 生成崩溃；该层同时惠及 SMTP EHLO 的 local_hostname，符合问题描述建议层，且与 message.py 现有的 idna 编码模式一致。核心 bug 的修复可信，同一复现脚本 red→green 以及 ASCII/已 punycode 幂等、全套 mail.tests 与 test_idn_send 的回归证据也较充分。不确定性主要在于：red 基线以 returncode 0 + 文本 FAIL 记录、step 23 的失败被管道掩盖、缺乏仓库针对性回归测试、以及德文/俄文等多语言 IDNA 边界并未真正执行；此外 DNS_NAME 对外语义变化未被评测。整体判断为高质量修复，但过程纪律和边界验证仍有明显缺口。",
+  "instance": "django__django-11532",
+  "submission": "20260217_mini-v2.0.0_glm-5-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-11532/20260217_mini-v2.0.0_glm-5-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788931254,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}

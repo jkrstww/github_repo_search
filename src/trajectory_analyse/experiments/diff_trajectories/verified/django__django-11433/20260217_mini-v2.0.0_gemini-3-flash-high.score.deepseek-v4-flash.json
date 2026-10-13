@@ -1,0 +1,252 @@
+{
+  "scores": {
+    "A": {
+      "name": "任务理解与验收标准",
+      "score": 11,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 13 / reproduce_issue.py",
+          "observation": "Pre-fix script outputs `my_field value: 'default_value' ... FAILURE: my_field was NOT overwritten`, demonstrating that cleaned_data assignments for an omitted field are dropped when the model field has a default.",
+          "impact": "Supports the core success criterion: cleaned_data must be able to override model field defaults."
+        },
+        {
+          "location": "steps 14, 39, 53",
+          "observation": "A second reproduction where `my_field` IS declared in the ModelForm and included in Meta.fields still fails before the fix and succeeds after the fix.",
+          "impact": "Shows the issue is independent of model-field vs declared-form-field handling."
+        },
+        {
+          "location": "test_preservation.py / step 54 and 64",
+          "observation": "An untouched form must keep `default_value` (`SUCCESS: model default was preserved`), demonstrating the agent recognized the constraint that unchanged omitted fields must retain model defaults.",
+          "impact": "Evidence for the preservation half of the acceptance criteria, though non-goals were never stated explicitly."
+        }
+      ]
+    },
+    "B": {
+      "name": "根因定位与假设验证",
+      "score": 12,
+      "max_score": 15,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 5-6 / `sed -n '31,68p' django/forms/models.py`",
+          "observation": "Agent located the responsible routine `construct_instance()` and the `if (f.has_default() and ... value_omitted_from_data(...)): continue` guard.",
+          "impact": "Identifies the real causal code path where default preservation suppresses a cleaned_data override."
+        },
+        {
+          "location": "steps 7-13, 33, 38, 52",
+          "observation": "The agent builds reproduction scripts, gets explicit `FAILURE`/`SUCCESS` outputs before and after candidate fixes rather than treating exit code 0 as correctness.",
+          "impact": "Verifies the causal chain against observable behavior in the affected layer."
+        },
+        {
+          "location": "step 45 / step 49",
+          "observation": "An overbroad whole-function replacement and a global replacement caused a `NameError: name 'form' is not defined` in `fields_for_model`, which the agent recognized, rolled back with `git checkout`, and narrowed the edit to `construct_instance`.",
+          "impact": "Minor negative evidence: earlier edits were not well-scoped and caused regressions, but demonstrates the responsibility-layer hypothesis was retained and corrected."
+        }
+      ]
+    },
+    "C": {
+      "name": "实现正确性、泛化与范围",
+      "score": 19,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 68 / patch.txt diff",
+          "observation": "Final patch only touches `django/forms/models.py` and changes the skip logic so an omitted-but-modified `cleaned_data` value is written unless it matches `field.to_python(None)`.",
+          "impact": "Fixes the reported scenario in both reproductions and keeps the model suite green."
+        },
+        {
+          "location": "steps 63, 64, 67",
+          "observation": "`tests/runtests.py model_forms --parallel 1` passes 164 tests (`OK`, skipped=1) and custom checks confirm defaults are preserved for omitted fields while declared overrides (including file defaults and BooleanField `False`) are applied.",
+          "impact": "Supports compatibility with existing behavior for the default-preservation contract in common cases."
+        },
+        {
+          "location": "final diff hunks 1-2",
+          "observation": "The patch adds a second independent condition to the `fields is not None` guard (`and f.name in form.fields`) and uses `cleaned_data[f.name] == form[f.name].field.to_python(None)` rather than Django's canonical `empty_values` semantics.",
+          "impact": "Risk: first hunk changes semantics for excluded/restricted fields, and the `to_python(None)` equality test is narrower than an empty-values check, leaving edge cases unverified."
+        }
+      ]
+    },
+    "D": {
+      "name": "测试设计与验证证据",
+      "score": 20,
+      "max_score": 25,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "step 13 vs step 38 / step 53",
+          "observation": "Same custom scripts show red (`FAILURE`) before any fix and green (`SUCCESS: my_field was overwritten`) after the actual code change for both the not-declared and declared-field variants.",
+          "impact": "Direct red→green evidence on the intended behavior with visible stdout."
+        },
+        {
+          "location": "step 54, 64, 67 / test_preservation.py, test_boolean.py",
+          "observation": "Post-fix custom tests show model defaults are preserved for untouched fields and that `False` can overwrite a BooleanField default.",
+          "impact": "Provides meaningful counterexamples and boundary checks beyond a single happy path."
+        },
+        {
+          "location": "steps 55, 63",
+          "observation": "Running the existing `model_forms` suite after an intermediate variant surfaced a real FileField regression (test_default_filefield), which was fixed and the full 164-test suite then passed.",
+          "impact": "Real regression coverage; however the final exact patch state was only verified with custom scripts, not by repeating the full suite."
+        }
+      ]
+    },
+    "E": {
+      "name": "执行纪律与错误恢复",
+      "score": 7,
+      "max_score": 10,
+      "level": "adequate",
+      "evidence": [
+        {
+          "location": "steps 34-36, 45-50",
+          "observation": "The agent repeatedly used broad `sed` replacements and whole-file rewrites that corrupted the file (duplicated `continue`, `NameError`), but rolled back via `git checkout` and used scoped replaces afterward.",
+          "impact": "Negative on discipline; positive on error recovery since each failure was followed by correction."
+        },
+        {
+          "location": "steps 8, 12, 42",
+          "observation": "Missing runtime dependency errors were correctly classified as environment issues, and necessary packages (`pytz`, `sqlparse`) were installed before re-running tests.",
+          "impact": "Good error classification, though global installs could have been avoided."
+        },
+        {
+          "location": "step 69 / final command",
+          "observation": "Submission was performed with the prescribed `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt`, with exit code 0 and full patch output visible.",
+          "impact": "Execution feedback loop was functional and truthful."
+        }
+      ]
+    },
+    "F": {
+      "name": "收尾、补丁卫生与可审计性",
+      "score": 5,
+      "max_score": 10,
+      "level": "limited",
+      "evidence": [
+        {
+          "location": "worktree after step 68 / step 69",
+          "observation": "Many reproduction scripts (`reproduce_issue*.py`, `test_*.py`) and `fix.patch` were left untracked in the worktree; no `git status` or temporary-file cleanup was performed.",
+          "impact": "Reduces auditability and risks environment contamination in evaluations that inspect the working tree."
+        },
+        {
+          "location": "step 68 / patch.txt",
+          "observation": "The submitted patch is non-empty, shows correct `--- a/` / `+++ b/` headers, and contains only the intended source file `django/forms/models.py`.",
+          "impact": "Patch scope and applicability are good."
+        },
+        {
+          "location": "step 69",
+          "observation": "Final patch was catted and submitted, but no `git diff --check`, no post-patch `git status`, and no final rerun of the official suite against the exact submitted patch state were performed.",
+          "impact": "Evidence gaps in final verification rather than fabrication."
+        }
+      ]
+    }
+  },
+  "raw_total_score": 74,
+  "total_score": 74,
+  "evidence_confidence": "medium",
+  "caps_or_flags": [],
+  "facts": {
+    "final_artifact": {
+      "modified_files": [
+        "django/forms/models.py"
+      ],
+      "patch_status": "non-empty, generated via git diff, source-only, not committed"
+    },
+    "timeline": [
+      "Step 13: custom reproduction yields expected baseline failure (default value not overwritten by cleaned_data).",
+      "Steps 31-38: first candidate only adds f.name-in-form.fields; repro 1 passes but declared-field variant at step 39 still fails.",
+      "Steps 44-50: several malformed/overbroad edits and rollbacks; corrected scoped patch to construct_instance.",
+      "Steps 55-63: intermediate comparison with clean(None) broke test_default_filefield; switched comparison to to_python(None) and full model_forms suite passed.",
+      "Steps 64-67: preserved-default and Boolean overwrite custom tests pass.",
+      "Step 68: patch.txt produced; step 69: submitted with `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt`."
+    ],
+    "environment": [
+      "Workdir /testbed; Django repo with source under /testbed/django and tests under /testbed/tests.",
+      "Dependencies pytz/sqlparse were missing and installed via pip during trajectory (step 8, 12, 42).",
+      "Python variants in use: default /opt/miniconda3 python and /usr/bin/python3 for the test runner."
+    ],
+    "evidence_gaps": [
+      "No official-suite failure-baseline before the fix; only custom reproduction scripts.",
+      "The full 164-test model_forms run was done on the immediately previous equivalent variant; the exact submitted patch state was only verified with custom scripts.",
+      "Final `git status`, `git diff --check`, and cleaning of untracked temp scripts are absent from the trace.",
+      "The edge semantics of fields excluded from Meta.fields and empty-values comparison were not separately validated."
+    ]
+  },
+  "oracle": {
+    "positive_behavior": [
+      "When a ModelForm field of a model field with a default is omitted from submitted data, modifying `cleaned_data[field]` inside `clean()` must be persisted to the instance on save/construct_instance."
+    ],
+    "negative_or_compatibility_behavior": [
+      "When clean() does not modify cleaned_data for an omitted field with a model default, the model default must continue to be preserved.",
+      "Existing behavior for `FileField` defaults and current model_forms suite must not regress."
+    ],
+    "boundaries": [
+      "Omitted versus explicitly submitted field values.",
+      "Declared form fields that are absent from POST data (e.g. unchecked Boolean, file defaults).",
+      "Fields excluded/restricted via Meta.fields, though the expected semantics were not explicitly specified in the trajectory."
+    ],
+    "forbidden_changes": [
+      "Modification of tests or configuration files; only non-test source changes are allowed for the final patch."
+    ],
+    "unknowns": [
+      "Exact upstream test assertions for this ticket.",
+      "Expected behavior when a user deliberately overrides an omitted field with Django's empty values (e.g. `''` or `False` depending on field type).",
+      "Whether Meta.fields-restricted fields are intentionally writable through cleaned_data additions."
+    ]
+  },
+  "evidence_gaps": [
+    {
+      "location": "steps 55-63 vs final patch",
+      "observation": "Full official model_forms suite pass occurred immediately before the last cosmetic re-apply of the same logic; no full suite rerun is shown for the exact submitted patch.txt state."
+    },
+    {
+      "location": "worktree after step 69",
+      "observation": "Reproduction/test scripts were left in /testbed and no git status/diff --check was shown."
+    },
+    {
+      "location": "final diff",
+      "observation": "The extra change to the `fields` guard and the use of `to_python(None)` rather than field.empty_values are not validated against the repository's intended edge semantics."
+    }
+  ],
+  "key_strengths": [
+    {
+      "location": "steps 13/14 versus 52/53/67",
+      "observation": "Clear red-to-green evidence on two distinct reproductions of the cleaned_data/default override issue."
+    },
+    {
+      "location": "steps 55-63",
+      "observation": "A real regression (test_default_filefield) was caught by running the full model_forms suite and guided the final refinement to to_python(None)."
+    },
+    {
+      "location": "step 68",
+      "observation": "Final patch is minimal at the file level (single source file, two hunks) and was submitted exactly as verified."
+    }
+  ],
+  "key_risks": [
+    {
+      "location": "patch hunk 1",
+      "observation": "Relaxing `fields is not None and f.name not in fields` with `and f.name in form.fields` can cause previously-skipped restricted/excluded fields to be written to the instance when injected into cleaned_data.",
+      "impact": "Potential silent semantic change outside the scope of the reported bug."
+    },
+    {
+      "location": "patch hunk 2",
+      "observation": "`cleaned_data[f.name] == form[f.name].field.to_python(None)` only tests a single empty representation instead of field.empty_values, leaving multi-value or non-standard empty cases unverified.",
+      "impact": "Hidden edge tests might fail relative to canonical Django semantics."
+    },
+    {
+      "location": "post-submit worktree",
+      "observation": "No cleanup of reproduce_issue*.py/test_*.py and no final git status.",
+      "impact": "The agent leaves environmental clutter that could contaminate later verification."
+    }
+  ],
+  "conclusion": "The submitted patch addresses the reported issue with strong behavioral evidence: custom scripts transitioned from FAILURE to SUCCESS on two distinct formulations, test_preservation.py confirms untouched defaults are retained, test_boolean.py covers an overwrite edge case, and the model_forms suite passed on the equivalently refined state. The final patch is non-empty, source-only, and plausibly close to the canonical fix. However, the extra modification to the Meta.fields guard and the use of a single `to_python(None)` comparison instead of Django's empty-values semantics introduce unverified behavior changes. Final verification of the exact submitted patch state and cleanup of scratch files were not performed, so the result is credible for the observed scenarios but not fully proven for edge semantics.",
+  "instance": "django__django-11433",
+  "submission": "20260217_mini-v2.0.0_gemini-3-flash-high",
+  "traj_path": "/Users/zzk/project/github_repo_search/src/trajectory_analyse/experiments/diff_trajectories/verified/django__django-11433/20260217_mini-v2.0.0_gemini-3-flash-high.json",
+  "_meta": {
+    "judge_id": "deepseek-v4-flash",
+    "scored_at_unix": 1788931074,
+    "parse_ok": true,
+    "valid": true,
+    "retried": false,
+    "reason": ""
+  }
+}
